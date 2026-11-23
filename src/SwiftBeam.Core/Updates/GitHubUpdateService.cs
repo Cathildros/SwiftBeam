@@ -167,11 +167,17 @@ public sealed class GitHubUpdateService
             }
             else if (isLinux)
             {
-                if (name.Equals("SwiftBeam", StringComparison.OrdinalIgnoreCase))
+                if (name.Equals("SwiftBeam-Linux-x64", StringComparison.OrdinalIgnoreCase))
                 {
                     preferredName = name;
                     preferredUrl = url;
                     preferredSize = size;
+                }
+                else if (name.Equals("SwiftBeam", StringComparison.OrdinalIgnoreCase))
+                {
+                    fallbackName = name;
+                    fallbackUrl = url;
+                    fallbackSize = size;
                 }
             }
         }

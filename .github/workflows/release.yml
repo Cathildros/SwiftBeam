@@ -48,11 +48,11 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/publish.ps1 -Runtimes win-x64 -Version "$env:RELEASE_VERSION"
 
-      - name: Upload Windows artifacts
+      - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: win-x64
-          path: dist/win-x64/*
+          path: dist/win-x64/SwiftBeam-Setup.exe
           if-no-files-found: error
 
   build-linux:
@@ -84,7 +84,7 @@ jobs:
       - name: Run Core Unit Tests
         run: dotnet test tests/SwiftBeam.Core.Tests/SwiftBeam.Core.Tests.csproj -c Release
 
-      - name: Publish Linux standalone binaries
+      - name: Publish Linux standalone binary
         shell: bash
         run: |
           mkdir -p dist/linux-x64
@@ -100,26 +100,14 @@ jobs:
             -p:DebugSymbols=false \
             -o dist/linux-x64
 
-          dotnet publish src/SwiftBeam.Cli/SwiftBeam.Cli.csproj \
-            -c Release \
-            -r linux-x64 \
-            --self-contained true \
-            -p:Version="$RELEASE_VERSION" \
-            -p:PublishSingleFile=true \
-            -p:EnableCompressionInSingleFile=true \
-            -p:DebugType=None \
-            -p:DebugSymbols=false \
-            -o dist/linux-x64
+          cp dist/linux-x64/SwiftBeam dist/linux-x64/SwiftBeam-Linux-x64
+          chmod +x dist/linux-x64/SwiftBeam-Linux-x64
 
-          cp src/SwiftBeam.Desktop/Assets/SwiftBeam.png dist/linux-x64/swiftbeam.png
-          cp scripts/install-linux.sh dist/linux-x64/install.sh
-          chmod +x dist/linux-x64/SwiftBeam dist/linux-x64/swiftbeam-cli dist/linux-x64/install.sh
-
-      - name: Upload Linux artifacts
+      - name: Upload Linux binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: dist/linux-x64/*
+          path: dist/linux-x64/SwiftBeam-Linux-x64
           if-no-files-found: error
 
   publish-release:
@@ -129,7 +117,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download build artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -152,11 +140,11 @@ jobs:
           TAG="v${VER}"
 
           cd release-assets
-          sha256sum SwiftBeam-Setup.exe SwiftBeam.exe swiftbeam-cli.exe SwiftBeam swiftbeam-cli swiftbeam.png install.sh install.ps1 > sha256sums.txt
+          sha256sum SwiftBeam-Setup.exe SwiftBeam-Linux-x64 > sha256sums.txt
           cat sha256sums.txt
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" * --clobber
+            gh release upload "$TAG" SwiftBeam-Setup.exe SwiftBeam-Linux-x64 sha256sums.txt --clobber
           else
-            gh release create "$TAG" * --title "SwiftBeam ${TAG}" --generate-notes
+            gh release create "$TAG" SwiftBeam-Setup.exe SwiftBeam-Linux-x64 sha256sums.txt --title "SwiftBeam ${TAG}" --generate-notes
           fi

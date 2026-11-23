@@ -844,14 +844,14 @@ public sealed class TransferEngineTests : IDisposable
         string checksums = """
             # SHA256SUMS
             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  SwiftBeam-Setup.exe
-            bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *SwiftBeam
+            bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *SwiftBeam-Linux-x64
             """;
         Assert.Equal(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             GitHubUpdateService.ExtractSha256ForAsset(checksums, "SwiftBeam-Setup.exe"));
         Assert.Equal(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            GitHubUpdateService.ExtractSha256ForAsset(checksums, "SwiftBeam"));
+            GitHubUpdateService.ExtractSha256ForAsset(checksums, "SwiftBeam-Linux-x64"));
         Assert.Null(GitHubUpdateService.ExtractSha256ForAsset(checksums, "missing.exe"));
 
         string releaseJson = """
@@ -873,9 +873,14 @@ public sealed class TransferEngineTests : IDisposable
                   "size": 84000000
                 },
                 {
+                  "name": "SwiftBeam-Linux-x64",
+                  "browser_download_url": "https://github.com/Cathildros/SwiftBeam/releases/download/v1.2.0/SwiftBeam-Linux-x64",
+                  "size": 48200000
+                },
+                {
                   "name": "SwiftBeam",
                   "browser_download_url": "https://github.com/Cathildros/SwiftBeam/releases/download/v1.2.0/SwiftBeam",
-                  "size": 48200000
+                  "size": 48100000
                 },
                 {
                   "name": "sha256sums.txt",
@@ -894,7 +899,7 @@ public sealed class TransferEngineTests : IDisposable
 
         var linuxUpdate = GitHubUpdateService.ParseReleaseJson(releaseJson, new Version(1, 0, 0), isWindows: false, isLinux: true, out _);
         Assert.NotNull(linuxUpdate);
-        Assert.Equal("SwiftBeam", linuxUpdate!.AssetName);
+        Assert.Equal("SwiftBeam-Linux-x64", linuxUpdate!.AssetName);
 
         var upToDate = GitHubUpdateService.ParseReleaseJson(releaseJson, new Version(1, 2, 0), isWindows: true, isLinux: false, out _);
         Assert.Null(upToDate);

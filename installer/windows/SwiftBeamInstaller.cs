@@ -5,6 +5,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
@@ -116,7 +118,7 @@ namespace SwiftBeamSetup
                 }
             }
             catch { }
-            return "1.0.0";
+            return "1.0.1";
         }
 
         internal static string GetDefaultInstallDir()
@@ -148,7 +150,6 @@ namespace SwiftBeamSetup
                     {
                         if (p.Id == selfPid) continue;
 
-                        // Wait briefly first in case the app initiated self-update shutdown
                         if (!p.WaitForExit(1500))
                         {
                             try
@@ -400,7 +401,6 @@ namespace SwiftBeamSetup
                 try { File.Delete(Path.Combine(installDir, "SwiftBeam.exe")); } catch { }
                 try { File.Delete(Path.Combine(installDir, "swiftbeam-cli.exe")); } catch { }
 
-                // Schedule self-deletion of Uninstall.exe and installDir after this process exits
                 ProcessStartInfo cleanupPsi = new ProcessStartInfo();
                 cleanupPsi.FileName = "cmd.exe";
                 cleanupPsi.Arguments = string.Format("/c ping 127.0.0.1 -n 3 > nul & rd /s /q \"{0}\"", installDir);
@@ -426,142 +426,640 @@ namespace SwiftBeamSetup
     }
 
 #if !UNINSTALLER_ONLY
+    internal static class RoundedGraphics
+    {
+        internal static GraphicsPath CreateRoundRect(Rectangle rect, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            if (rect.Width <= 0 || rect.Height <= 0)
+                return path;
+
+            int d = Math.Min(Math.Max(2, radius * 2), Math.Min(rect.Width, rect.Height));
+            Rectangle arc = new Rectangle(rect.Location, new Size(d, d));
+
+            path.AddArc(arc, 180, 90);
+            arc.X = rect.Right - d;
+            path.AddArc(arc, 270, 90);
+            arc.Y = rect.Bottom - d;
+            path.AddArc(arc, 0, 90);
+            arc.X = rect.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        internal static void FillAndStrokeRoundRect(Graphics g, Rectangle rect, int radius, Color fillColor, Color borderColor, float borderWidth)
+        {
+            if (rect.Width <= 2 || rect.Height <= 2) return;
+            using (GraphicsPath path = CreateRoundRect(rect, radius))
+            {
+                using (SolidBrush fillBrush = new SolidBrush(fillColor))
+                {
+                    g.FillPath(fillBrush, path);
+                }
+                if (borderWidth > 0 && borderColor.A > 0)
+                {
+                    using (Pen pen = new Pen(borderColor, borderWidth))
+                    {
+                        g.DrawPath(pen, path);
+                    }
+                }
+            }
+        }
+    }
+
+    internal sealed class HeaderBannerPanel : Panel
+    {
+        private readonly Image _iconImage;
+        private readonly string _title;
+        private readonly string _versionText;
+        private readonly string _subtitle;
+        private readonly float _dpi;
+
+        internal HeaderBannerPanel(Image iconImage, string title, string versionText, string subtitle, float dpi)
+        {
+            _iconImage = iconImage;
+            _title = title;
+            _versionText = versionText;
+            _subtitle = subtitle;
+            _dpi = dpi;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        private int S(int px) { return (int)Math.Round(px * _dpi); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+
+            Rectangle full = new Rectangle(0, 0, Width, Height);
+            using (LinearGradientBrush grad = new LinearGradientBrush(full, Color.FromArgb(34, 16, 72), Color.FromArgb(59, 21, 120), 15f))
+            {
+                g.FillRectangle(grad, full);
+            }
+
+            using (SolidBrush accent = new SolidBrush(Color.FromArgb(139, 92, 246)))
+            {
+                g.FillRectangle(accent, 0, Height - S(2), Width, S(2));
+            }
+
+            int iconSize = S(42);
+            int iconX = S(20);
+            int iconY = (Height - iconSize) / 2;
+            if (_iconImage != null)
+            {
+                g.DrawImage(_iconImage, new Rectangle(iconX, iconY, iconSize, iconSize));
+            }
+
+            int textX = iconX + iconSize + S(14);
+            using (Font titleFont = new Font("Segoe UI", 14.5F, FontStyle.Bold))
+            using (Font verFont = new Font("Segoe UI", 8.5F, FontStyle.Bold))
+            using (Font subFont = new Font("Segoe UI", 9F, FontStyle.Regular))
+            {
+                SizeF titleSz = g.MeasureString(_title, titleFont);
+                int titleY = S(16);
+                using (SolidBrush whiteBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString(_title, titleFont, whiteBrush, textX, titleY);
+                }
+
+                SizeF verSz = g.MeasureString(_versionText, verFont);
+                int badgeW = (int)Math.Ceiling(verSz.Width) + S(14);
+                int badgeH = S(22);
+                int badgeX = textX + (int)Math.Ceiling(titleSz.Width) + S(8);
+                int badgeY = titleY + S(3);
+                Rectangle badgeRect = new Rectangle(badgeX, badgeY, badgeW, badgeH);
+                RoundedGraphics.FillAndStrokeRoundRect(g, badgeRect, S(7), Color.FromArgb(124, 58, 237), Color.FromArgb(167, 139, 250), 1f);
+
+                using (StringFormat centerFmt = new StringFormat())
+                using (SolidBrush badgeTextBrush = new SolidBrush(Color.FromArgb(245, 243, 255)))
+                {
+                    centerFmt.Alignment = StringAlignment.Center;
+                    centerFmt.LineAlignment = StringAlignment.Center;
+                    g.DrawString(_versionText, verFont, badgeTextBrush, badgeRect, centerFmt);
+                }
+
+                using (SolidBrush subBrush = new SolidBrush(Color.FromArgb(221, 214, 254)))
+                {
+                    g.DrawString(_subtitle, subFont, subBrush, textX + S(1), S(47));
+                }
+            }
+        }
+    }
+
+    internal sealed class RoundedPanel : Panel
+    {
+        internal int CornerRadius { get; set; }
+        internal Color FillColor { get; set; }
+        internal Color BorderColor { get; set; }
+        internal float BorderThickness { get; set; }
+
+        internal RoundedPanel()
+        {
+            CornerRadius = 12;
+            FillColor = Color.FromArgb(17, 24, 39);
+            BorderColor = Color.FromArgb(31, 41, 55);
+            BorderThickness = 1f;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.Transparent;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            RoundedGraphics.FillAndStrokeRoundRect(e.Graphics, rect, CornerRadius, FillColor, BorderColor, BorderThickness);
+        }
+    }
+
+    internal sealed class RoundedButton : Control
+    {
+        private bool _hover;
+        private bool _pressed;
+
+        internal int CornerRadius { get; set; }
+        internal Color NormalBackColor { get; set; }
+        internal Color HoverBackColor { get; set; }
+        internal Color PressedBackColor { get; set; }
+        internal Color NormalBorderColor { get; set; }
+        internal Color DisabledBackColor { get; set; }
+
+        internal RoundedButton()
+        {
+            CornerRadius = 10;
+            NormalBackColor = Color.FromArgb(30, 41, 59);
+            HoverBackColor = Color.FromArgb(51, 65, 85);
+            PressedBackColor = Color.FromArgb(30, 41, 59);
+            NormalBorderColor = Color.FromArgb(51, 65, 85);
+            DisabledBackColor = Color.FromArgb(24, 32, 46);
+            ForeColor = Color.FromArgb(226, 232, 240);
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            BackColor = Color.Transparent;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; _pressed = false; Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button == MouseButtons.Left) { _pressed = true; Invalidate(); } }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _pressed = false; Invalidate(); }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if ((e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) && Enabled)
+            {
+                OnClick(EventArgs.Empty);
+                e.Handled = true;
+            }
+        }
+
+        internal void PerformClick()
+        {
+            if (Enabled) OnClick(EventArgs.Empty);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            Color bg = !Enabled ? DisabledBackColor : (_pressed ? PressedBackColor : (_hover ? HoverBackColor : NormalBackColor));
+            Color fg = Enabled ? ForeColor : Color.FromArgb(100, 116, 139);
+            Color bd = !Enabled ? Color.FromArgb(30, 41, 59) : (Focused ? Color.FromArgb(196, 181, 253) : NormalBorderColor);
+
+            Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            RoundedGraphics.FillAndStrokeRoundRect(g, rect, CornerRadius, bg, bd, Focused ? 1.5f : 1f);
+
+            using (StringFormat fmt = new StringFormat())
+            using (SolidBrush textBrush = new SolidBrush(fg))
+            {
+                fmt.Alignment = StringAlignment.Center;
+                fmt.LineAlignment = StringAlignment.Center;
+                g.DrawString(Text, Font, textBrush, rect, fmt);
+            }
+        }
+    }
+
+    internal sealed class RoundedCheckBox : Control
+    {
+        private bool _checked;
+        private bool _hover;
+        private readonly float _dpi;
+
+        internal bool Checked
+        {
+            get { return _checked; }
+            set
+            {
+                if (_checked != value)
+                {
+                    _checked = value;
+                    Invalidate();
+                }
+            }
+        }
+
+        internal RoundedCheckBox(float dpi)
+        {
+            _dpi = dpi;
+            ForeColor = Color.FromArgb(226, 232, 240);
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            BackColor = Color.Transparent;
+        }
+
+        private int S(int px) { return (int)Math.Round(px * _dpi); }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; Invalidate(); }
+
+        protected override void OnClick(EventArgs e)
+        {
+            if (!Enabled) return;
+            Checked = !Checked;
+            base.OnClick(e);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Space && Enabled)
+            {
+                Checked = !Checked;
+                e.Handled = true;
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            int boxSz = S(18);
+            int boxY = (Height - boxSz) / 2;
+            Rectangle boxRect = new Rectangle(S(1), boxY, boxSz, boxSz);
+
+            Color fill = _checked
+                ? (_hover ? Color.FromArgb(167, 139, 250) : Color.FromArgb(139, 92, 246))
+                : Color.FromArgb(11, 17, 32);
+            Color border = _checked
+                ? Color.FromArgb(167, 139, 250)
+                : (_hover || Focused ? Color.FromArgb(139, 92, 246) : Color.FromArgb(51, 65, 85));
+
+            RoundedGraphics.FillAndStrokeRoundRect(g, boxRect, S(5), fill, border, 1.3f);
+
+            if (_checked)
+            {
+                using (Pen checkPen = new Pen(Color.White, Math.Max(1.8f, 2.0f * _dpi)))
+                {
+                    checkPen.StartCap = LineCap.Round;
+                    checkPen.EndCap = LineCap.Round;
+                    checkPen.LineJoin = LineJoin.Round;
+                    Point[] pts = new Point[]
+                    {
+                        new Point(boxRect.Left + S(4), boxRect.Top + S(9)),
+                        new Point(boxRect.Left + S(8), boxRect.Top + S(13)),
+                        new Point(boxRect.Left + S(14), boxRect.Top + S(5))
+                    };
+                    g.DrawLines(checkPen, pts);
+                }
+            }
+
+            Rectangle textRect = new Rectangle(boxRect.Right + S(10), 0, Width - boxRect.Right - S(12), Height);
+            Color textColor = Enabled ? ForeColor : Color.FromArgb(100, 116, 139);
+            using (StringFormat fmt = new StringFormat())
+            using (SolidBrush tb = new SolidBrush(textColor))
+            {
+                fmt.Alignment = StringAlignment.Near;
+                fmt.LineAlignment = StringAlignment.Center;
+                fmt.HotkeyPrefix = HotkeyPrefix.None;
+                g.DrawString(Text, Font, tb, textRect, fmt);
+            }
+        }
+    }
+
+    internal sealed class RoundedProgressBar : Control
+    {
+        private readonly System.Windows.Forms.Timer _animTimer;
+        private int _marqueeOffset;
+        private bool _marquee;
+        private int _value;
+
+        internal bool Marquee
+        {
+            get { return _marquee; }
+            set
+            {
+                _marquee = value;
+                if (_marquee) _animTimer.Start();
+                else _animTimer.Stop();
+                Invalidate();
+            }
+        }
+
+        internal int Value
+        {
+            get { return _value; }
+            set
+            {
+                int clamped = Math.Max(0, Math.Min(100, value));
+                if (_value != clamped)
+                {
+                    _value = clamped;
+                    Invalidate();
+                }
+            }
+        }
+
+        internal RoundedProgressBar()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
+            BackColor = Color.Transparent;
+            _animTimer = new System.Windows.Forms.Timer();
+            _animTimer.Interval = 24;
+            _animTimer.Tick += delegate(object s, EventArgs e)
+            {
+                _marqueeOffset = (_marqueeOffset + 8) % Math.Max(1, Width + 140);
+                Invalidate();
+            };
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _animTimer != null)
+            {
+                _animTimer.Stop();
+                _animTimer.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            int radius = Math.Max(2, Height / 2);
+            Rectangle track = new Rectangle(0, 0, Width - 1, Height - 1);
+            RoundedGraphics.FillAndStrokeRoundRect(g, track, radius, Color.FromArgb(30, 41, 59), Color.FromArgb(51, 65, 85), 1f);
+
+            if (_marquee)
+            {
+                int pillW = Math.Max(60, Width / 3);
+                int pillX = _marqueeOffset - pillW;
+                Rectangle pillRect = new Rectangle(Math.Max(1, pillX), 1, Math.Min(pillW, Width - 2 - Math.Max(1, pillX)), Math.Max(2, Height - 3));
+                if (pillRect.Width > 4)
+                {
+                    RoundedGraphics.FillAndStrokeRoundRect(g, pillRect, radius, Color.FromArgb(139, 92, 246), Color.Empty, 0f);
+                }
+            }
+            else if (_value > 0)
+            {
+                int fillW = (int)Math.Round((Width - 2) * (_value / 100.0));
+                if (fillW > 3)
+                {
+                    Rectangle fillRect = new Rectangle(1, 1, fillW, Math.Max(2, Height - 3));
+                    Color fillColor = _value >= 100 ? Color.FromArgb(16, 185, 129) : Color.FromArgb(139, 92, 246);
+                    RoundedGraphics.FillAndStrokeRoundRect(g, fillRect, radius, fillColor, Color.Empty, 0f);
+                }
+            }
+        }
+    }
+
     internal sealed class InstallerForm : Form
     {
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        private readonly float _dpi;
+        private readonly RoundedPanel _pathCapsule;
         private readonly TextBox _pathBox;
-        private readonly Button _browseBtn;
-        private readonly CheckBox _chkDesktop;
-        private readonly CheckBox _chkStartMenu;
-        private readonly CheckBox _chkLaunch;
+        private readonly RoundedButton _browseBtn;
+        private readonly RoundedCheckBox _chkDesktop;
+        private readonly RoundedCheckBox _chkStartMenu;
+        private readonly RoundedCheckBox _chkLaunch;
         private readonly Label _statusLabel;
-        private readonly ProgressBar _progressBar;
-        private readonly Button _installBtn;
-        private readonly Button _cancelBtn;
+        private readonly RoundedProgressBar _progressBar;
+        private readonly RoundedButton _installBtn;
+        private readonly RoundedButton _cancelBtn;
+
+        private int S(int px) { return (int)Math.Round(px * _dpi); }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                int dark = 1;
+                if (DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int)) != 0)
+                {
+                    DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, ref dark, sizeof(int));
+                }
+            }
+            catch { }
+        }
 
         internal InstallerForm(string customDir)
         {
+            using (Graphics g = CreateGraphics())
+            {
+                _dpi = Math.Max(1.0f, g.DpiX / 96.0f);
+            }
+
             string ver = Program.GetAppVersion();
-            Text = "SwiftBeam v" + ver + " Setup";
-            ClientSize = new Size(510, 390);
-            FormBorderStyle = FormBorderStyle.FixedDialog;
+            Text = "SwiftBeam Setup";
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(S(520), S(430));
+            FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             MinimizeBox = true;
             StartPosition = FormStartPosition.CenterScreen;
-            AutoScaleMode = AutoScaleMode.Font;
             BackColor = Color.FromArgb(11, 17, 32);
             ForeColor = Color.FromArgb(241, 245, 249);
             Font = new Font("Segoe UI", 9.5F, FontStyle.Regular);
+            DoubleBuffered = true;
 
+            Bitmap iconBmp = null;
             try
             {
                 Icon exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                if (exeIcon != null) Icon = exeIcon;
+                if (exeIcon != null)
+                {
+                    Icon = exeIcon;
+                    iconBmp = exeIcon.ToBitmap();
+                }
             }
             catch { }
 
-            Panel header = new Panel();
-            header.SetBounds(0, 0, 510, 74);
-            header.BackColor = Color.FromArgb(46, 16, 101);
+            HeaderBannerPanel header = new HeaderBannerPanel(
+                iconBmp,
+                "Install SwiftBeam",
+                "v" + ver,
+                "Fast cross-platform parallel file transfer over Wi-Fi, LAN & direct cable",
+                _dpi);
+            header.SetBounds(0, 0, S(520), S(82));
             Controls.Add(header);
 
-            Panel accentLine = new Panel();
-            accentLine.SetBounds(0, 72, 510, 2);
-            accentLine.BackColor = Color.FromArgb(139, 92, 246);
-            header.Controls.Add(accentLine);
-
-            Label titleLbl = new Label();
-            titleLbl.Text = "Install SwiftBeam v" + ver;
-            titleLbl.Font = new Font("Segoe UI", 15F, FontStyle.Bold);
-            titleLbl.ForeColor = Color.White;
-            titleLbl.SetBounds(22, 13, 460, 28);
-            header.Controls.Add(titleLbl);
-
-            Label subLbl = new Label();
-            subLbl.Text = "Fast cross-platform parallel file transfer over Wi-Fi, LAN & direct cable";
-            subLbl.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
-            subLbl.ForeColor = Color.FromArgb(221, 214, 254);
-            subLbl.SetBounds(24, 44, 460, 20);
-            header.Controls.Add(subLbl);
+            // Card 1: Destination Folder
+            RoundedPanel destCard = new RoundedPanel();
+            destCard.CornerRadius = S(12);
+            destCard.FillColor = Color.FromArgb(17, 24, 39);
+            destCard.BorderColor = Color.FromArgb(31, 41, 55);
+            destCard.SetBounds(S(18), S(96), S(484), S(94));
+            Controls.Add(destCard);
 
             Label destLbl = new Label();
-            destLbl.Text = "Destination Folder (Per-User, No Admin Required)";
-            destLbl.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
-            destLbl.ForeColor = Color.FromArgb(226, 232, 240);
-            destLbl.SetBounds(24, 92, 460, 20);
-            Controls.Add(destLbl);
+            destLbl.Text = "DESTINATION FOLDER  (PER-USER • NO ADMIN REQUIRED)";
+            destLbl.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+            destLbl.ForeColor = Color.FromArgb(148, 163, 184);
+            destLbl.UseMnemonic = false;
+            destLbl.SetBounds(S(14), S(12), S(450), S(18));
+            destCard.Controls.Add(destLbl);
+
+            _pathCapsule = new RoundedPanel();
+            _pathCapsule.CornerRadius = S(9);
+            _pathCapsule.FillColor = Color.FromArgb(11, 17, 32);
+            _pathCapsule.BorderColor = Color.FromArgb(30, 41, 59);
+            _pathCapsule.SetBounds(S(14), S(38), S(356), S(38));
+            destCard.Controls.Add(_pathCapsule);
 
             _pathBox = new TextBox();
             _pathBox.Text = !string.IsNullOrEmpty(customDir) ? customDir : Program.GetDefaultInstallDir();
-            _pathBox.BackColor = Color.FromArgb(15, 23, 42);
+            _pathBox.BackColor = Color.FromArgb(11, 17, 32);
             _pathBox.ForeColor = Color.FromArgb(241, 245, 249);
-            _pathBox.BorderStyle = BorderStyle.FixedSingle;
+            _pathBox.BorderStyle = BorderStyle.None;
             _pathBox.Font = new Font("Segoe UI", 9.5F);
-            _pathBox.SetBounds(24, 118, 370, 26);
-            Controls.Add(_pathBox);
+            int boxH = _pathBox.PreferredHeight;
+            int boxY = Math.Max(2, (_pathCapsule.Height - boxH) / 2);
+            _pathBox.SetBounds(S(12), boxY, _pathCapsule.Width - S(24), boxH);
+            _pathBox.GotFocus += delegate(object s, EventArgs e)
+            {
+                _pathCapsule.BorderColor = Color.FromArgb(139, 92, 246);
+                _pathCapsule.Invalidate();
+            };
+            _pathBox.LostFocus += delegate(object s, EventArgs e)
+            {
+                _pathCapsule.BorderColor = Color.FromArgb(30, 41, 59);
+                _pathCapsule.Invalidate();
+            };
+            _pathCapsule.Controls.Add(_pathBox);
 
-            _browseBtn = CreateStyledButton("Browse...", Color.FromArgb(30, 41, 59), Color.FromArgb(226, 232, 240));
-            _browseBtn.SetBounds(402, 116, 84, 28);
+            _browseBtn = CreateSubtleButton("Browse...");
+            _browseBtn.SetBounds(S(378), S(38), S(92), S(38));
+            _browseBtn.CornerRadius = S(9);
             _browseBtn.Click += OnBrowseClick;
-            Controls.Add(_browseBtn);
+            destCard.Controls.Add(_browseBtn);
 
-            _chkDesktop = CreateOptionCheck("Create Desktop shortcut", true, 162);
-            _chkStartMenu = CreateOptionCheck("Create Start Menu shortcut (enables Windows Search)", true, 190);
-            _chkLaunch = CreateOptionCheck("Launch SwiftBeam when finished", true, 218);
-            Controls.Add(_chkDesktop);
-            Controls.Add(_chkStartMenu);
-            Controls.Add(_chkLaunch);
+            // Card 2: Options
+            RoundedPanel optCard = new RoundedPanel();
+            optCard.CornerRadius = S(12);
+            optCard.FillColor = Color.FromArgb(17, 24, 39);
+            optCard.BorderColor = Color.FromArgb(31, 41, 55);
+            optCard.SetBounds(S(18), S(202), S(484), S(112));
+            Controls.Add(optCard);
 
+            _chkDesktop = CreateOptionCheck("Create Desktop shortcut", true, S(14));
+            _chkStartMenu = CreateOptionCheck("Create Start Menu shortcut (enables Windows Search)", true, S(45));
+            _chkLaunch = CreateOptionCheck("Launch SwiftBeam when finished", true, S(76));
+            optCard.Controls.Add(_chkDesktop);
+            optCard.Controls.Add(_chkStartMenu);
+            optCard.Controls.Add(_chkLaunch);
+
+            // Status & Rounded Progress Bar
             _statusLabel = new Label();
-            _statusLabel.Text = "Ready to install with instant silent auto-updates.";
+            _statusLabel.Text = "Ready to install with silent GitHub auto-updates.";
+            _statusLabel.Font = new Font("Segoe UI", 8.75F, FontStyle.Regular);
             _statusLabel.ForeColor = Color.FromArgb(148, 163, 184);
-            _statusLabel.SetBounds(24, 260, 462, 20);
+            _statusLabel.UseMnemonic = false;
+            _statusLabel.SetBounds(S(20), S(326), S(480), S(20));
             Controls.Add(_statusLabel);
 
-            _progressBar = new ProgressBar();
-            _progressBar.SetBounds(24, 286, 462, 14);
-            _progressBar.Style = ProgressBarStyle.Continuous;
-            _progressBar.Minimum = 0;
-            _progressBar.Maximum = 100;
-            _progressBar.Value = 0;
+            _progressBar = new RoundedProgressBar();
+            _progressBar.SetBounds(S(18), S(350), S(484), S(10));
             Controls.Add(_progressBar);
 
+            // Bottom Action Bar
             Panel footerLine = new Panel();
-            footerLine.SetBounds(0, 320, 510, 1);
+            footerLine.SetBounds(0, S(372), S(520), 1);
             footerLine.BackColor = Color.FromArgb(30, 41, 59);
             Controls.Add(footerLine);
 
-            _cancelBtn = CreateStyledButton("Cancel", Color.FromArgb(30, 41, 59), Color.FromArgb(226, 232, 240));
-            _cancelBtn.SetBounds(268, 336, 94, 34);
+            _cancelBtn = CreateSubtleButton("Cancel");
+            _cancelBtn.SetBounds(S(284), S(383), S(96), S(36));
             _cancelBtn.Click += delegate(object sender, EventArgs e) { Close(); };
             Controls.Add(_cancelBtn);
 
-            _installBtn = CreateStyledButton("Install", Color.FromArgb(139, 92, 246), Color.White);
-            _installBtn.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
-            _installBtn.SetBounds(372, 336, 114, 34);
+            _installBtn = CreatePrimaryButton("Install");
+            _installBtn.SetBounds(S(390), S(383), S(112), S(36));
             _installBtn.Click += OnInstallClick;
             Controls.Add(_installBtn);
-            AcceptButton = _installBtn;
+
+            Shown += delegate(object sender, EventArgs e)
+            {
+                _pathBox.SelectionLength = 0;
+                _pathBox.SelectionStart = _pathBox.Text.Length;
+                ActiveControl = _installBtn;
+            };
         }
 
-        private CheckBox CreateOptionCheck(string text, bool checkedByDefault, int y)
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            CheckBox chk = new CheckBox();
+            if (keyData == Keys.Enter && _installBtn.Enabled)
+            {
+                _installBtn.PerformClick();
+                return true;
+            }
+            if (keyData == Keys.Escape && _cancelBtn.Enabled)
+            {
+                Close();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private RoundedCheckBox CreateOptionCheck(string text, bool checkedByDefault, int y)
+        {
+            RoundedCheckBox chk = new RoundedCheckBox(_dpi);
             chk.Text = text;
             chk.Checked = checkedByDefault;
-            chk.ForeColor = Color.FromArgb(226, 232, 240);
-            chk.SetBounds(24, y, 462, 22);
+            chk.Font = new Font("Segoe UI", 9.5F);
+            chk.SetBounds(S(14), y, S(456), S(24));
             return chk;
         }
 
-        private Button CreateStyledButton(string text, Color backColor, Color foreColor)
+        private RoundedButton CreatePrimaryButton(string text)
         {
-            Button btn = new Button();
+            RoundedButton btn = new RoundedButton();
             btn.Text = text;
-            btn.BackColor = backColor;
-            btn.ForeColor = foreColor;
-            btn.FlatStyle = FlatStyle.Flat;
-            btn.FlatAppearance.BorderSize = 0;
-            btn.Cursor = Cursors.Hand;
+            btn.CornerRadius = S(10);
+            btn.NormalBackColor = Color.FromArgb(139, 92, 246);
+            btn.HoverBackColor = Color.FromArgb(167, 139, 250);
+            btn.PressedBackColor = Color.FromArgb(124, 58, 237);
+            btn.NormalBorderColor = Color.FromArgb(167, 139, 250);
+            btn.ForeColor = Color.White;
+            btn.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+            return btn;
+        }
+
+        private RoundedButton CreateSubtleButton(string text)
+        {
+            RoundedButton btn = new RoundedButton();
+            btn.Text = text;
+            btn.CornerRadius = S(10);
+            btn.NormalBackColor = Color.FromArgb(30, 41, 59);
+            btn.HoverBackColor = Color.FromArgb(51, 65, 85);
+            btn.PressedBackColor = Color.FromArgb(30, 41, 59);
+            btn.NormalBorderColor = Color.FromArgb(51, 65, 85);
+            btn.ForeColor = Color.FromArgb(226, 232, 240);
+            btn.Font = new Font("Segoe UI", 9.25F, FontStyle.Regular);
             return btn;
         }
 
@@ -578,6 +1076,8 @@ namespace SwiftBeamSetup
                     _pathBox.Text = string.Equals(leaf, "SwiftBeam", StringComparison.OrdinalIgnoreCase)
                         ? selected
                         : Path.Combine(selected, "SwiftBeam");
+                    _pathBox.SelectionLength = 0;
+                    _pathBox.SelectionStart = _pathBox.Text.Length;
                 }
             }
         }
@@ -598,7 +1098,7 @@ namespace SwiftBeamSetup
             _chkLaunch.Enabled = false;
             _installBtn.Enabled = false;
             _cancelBtn.Enabled = false;
-            _progressBar.Style = ProgressBarStyle.Marquee;
+            _progressBar.Marquee = true;
 
             bool desktop = _chkDesktop.Checked;
             bool startMenu = _chkStartMenu.Checked;
@@ -615,7 +1115,7 @@ namespace SwiftBeamSetup
 
                     BeginInvoke((MethodInvoker)delegate()
                     {
-                        _progressBar.Style = ProgressBarStyle.Continuous;
+                        _progressBar.Marquee = false;
                         _progressBar.Value = 100;
                         _statusLabel.Text = "SwiftBeam installed successfully!";
                         _statusLabel.ForeColor = Color.FromArgb(52, 211, 153);
@@ -633,7 +1133,7 @@ namespace SwiftBeamSetup
                 {
                     BeginInvoke((MethodInvoker)delegate()
                     {
-                        _progressBar.Style = ProgressBarStyle.Continuous;
+                        _progressBar.Marquee = false;
                         _progressBar.Value = 0;
                         _statusLabel.Text = "Installation failed: " + ex.Message;
                         _statusLabel.ForeColor = Color.FromArgb(248, 113, 113);
