@@ -1,0 +1,162 @@
+name: Build and Release SwiftBeam
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without v prefix (optional, defaults to Directory.Build.props)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $ver = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($ver) -and "${{ github.ref_type }}" -eq "tag") {
+            $ver = "${{ github.ref_name }}".TrimStart('v', 'V')
+          }
+          if ([string]::IsNullOrWhiteSpace($ver)) {
+            [xml]$props = Get-Content Directory.Build.props -Raw
+            $ver = $props.Project.PropertyGroup.Version
+          }
+          $ver = $ver.Trim().TrimStart('v', 'V')
+          "RELEASE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved Windows build version: $ver"
+
+      - name: Run Core Unit Tests
+        run: dotnet test tests/SwiftBeam.Core.Tests/SwiftBeam.Core.Tests.csproj -c Release
+
+      - name: Publish Windows binaries and SwiftBeam-Setup.exe
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/publish.ps1 -Runtimes win-x64 -Version "$env:RELEASE_VERSION"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: dist/win-x64/*
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [[ -z "$VER" && "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${{ github.ref_name }}"
+          fi
+          if [[ -z "$VER" ]]; then
+            VER="$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -n1)"
+          fi
+          VER="${VER#v}"
+          VER="${VER#V}"
+          echo "RELEASE_VERSION=${VER}" >> "$GITHUB_ENV"
+          echo "Resolved Linux build version: ${VER}"
+
+      - name: Run Core Unit Tests
+        run: dotnet test tests/SwiftBeam.Core.Tests/SwiftBeam.Core.Tests.csproj -c Release
+
+      - name: Publish Linux standalone binaries
+        shell: bash
+        run: |
+          mkdir -p dist/linux-x64
+          dotnet publish src/SwiftBeam.Desktop/SwiftBeam.Desktop.csproj \
+            -c Release \
+            -r linux-x64 \
+            --self-contained true \
+            -p:Version="$RELEASE_VERSION" \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o dist/linux-x64
+
+          dotnet publish src/SwiftBeam.Cli/SwiftBeam.Cli.csproj \
+            -c Release \
+            -r linux-x64 \
+            --self-contained true \
+            -p:Version="$RELEASE_VERSION" \
+            -p:PublishSingleFile=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o dist/linux-x64
+
+          cp src/SwiftBeam.Desktop/Assets/SwiftBeam.png dist/linux-x64/swiftbeam.png
+          cp scripts/install-linux.sh dist/linux-x64/install.sh
+          chmod +x dist/linux-x64/SwiftBeam dist/linux-x64/swiftbeam-cli dist/linux-x64/install.sh
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/linux-x64/*
+          if-no-files-found: error
+
+  publish-release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [[ -z "$VER" && "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${{ github.ref_name }}"
+          fi
+          if [[ -z "$VER" ]]; then
+            VER="$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -n1)"
+          fi
+          VER="${VER#v}"
+          VER="${VER#V}"
+          TAG="v${VER}"
+
+          cd release-assets
+          sha256sum SwiftBeam-Setup.exe SwiftBeam.exe swiftbeam-cli.exe SwiftBeam swiftbeam-cli swiftbeam.png install.sh install.ps1 > sha256sums.txt
+          cat sha256sums.txt
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" * --clobber
+          else
+            gh release create "$TAG" * --title "SwiftBeam ${TAG}" --generate-notes
+          fi

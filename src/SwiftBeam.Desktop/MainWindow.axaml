@@ -1,0 +1,965 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:SwiftBeam.Desktop.ViewModels"
+        xmlns:disc="using:SwiftBeam.Core.Discovery"
+        xmlns:cfg="using:SwiftBeam.Core.Settings"
+        x:Class="SwiftBeam.Desktop.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="SwiftBeam — Fast Cross-Platform File Transfer"
+        Width="1260" Height="820"
+        MinWidth="960" MinHeight="640"
+        Background="#0B1120"
+        Foreground="#F1F5F9">
+
+  <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,*">
+    <!-- Top Header Bar (Navigation Pills + Shifting Connect Pill + Compact Host Menu) -->
+    <Border Grid.Row="0" Background="#0F172A" BorderBrush="#1E293B" BorderThickness="0,0,0,1" Padding="12,7">
+      <Grid ColumnDefinitions="Auto,10,Auto,*,Auto,8,Auto">
+        <!-- Brand -->
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center"
+                    ToolTip.Tip="{Binding DeviceName}">
+          <Image Source="avares://SwiftBeam/Assets/SwiftBeam.png" Width="28" Height="28" VerticalAlignment="Center"/>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="SwiftBeam" FontSize="14.5" FontWeight="Bold" Foreground="#F8FAFC"/>
+            <TextBlock Text="{Binding PrimaryAddressText}" FontSize="10" Foreground="#64748B"/>
+          </StackPanel>
+        </StackPanel>
+
+        <!-- Segmented Top Navigation Pills -->
+        <Border Grid.Column="2" Classes="pill-tray" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="2">
+            <Button Content="File Transfer" Classes="nav" Padding="10,4" FontSize="11.5"
+                    Background="{Binding TransferTabBg}" Foreground="{Binding TransferTabFg}"
+                    Command="{Binding ShowTransferTabCommand}"/>
+            <Button Content="Host &amp; Settings" Classes="nav" Padding="10,4" FontSize="11.5"
+                    Background="{Binding SettingsTabBg}" Foreground="{Binding SettingsTabFg}"
+                    Command="{Binding ShowSettingsTabCommand}"/>
+            <Button Content="Activity Log" Classes="nav" Padding="10,4" FontSize="11.5"
+                    Background="{Binding LogTabBg}" Foreground="{Binding LogTabFg}"
+                    Command="{Binding ShowLogTabCommand}"/>
+          </StackPanel>
+        </Border>
+
+        <!-- Shifting Connect / Connected Pill -->
+        <Grid Grid.Column="4" VerticalAlignment="Center">
+          <!-- Disconnected: Computer Picker + 1-Click Connect Pill (with Shifting Flyout Contexts) -->
+          <Border x:Name="ConnectPillBorder"
+                  Classes="pill-tray"
+                  IsVisible="{Binding IsDisconnected}"
+                  VerticalAlignment="Center">
+            <FlyoutBase.AttachedFlyout>
+              <Flyout Placement="BottomEdgeAlignedRight"
+                      FlyoutPresenterClasses="swift-popover">
+                <StackPanel Width="340">
+                  <!-- STEP 0: Pick Nearby / Saved Computer or Manual IP -->
+                  <StackPanel IsVisible="{Binding IsPickTargetStep}" Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Text="Connect to a computer" FontSize="13" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/>
+                      <Button Grid.Column="1" Content="Scan" Classes="subtle" CornerRadius="7" Padding="9,3" FontSize="11"
+                              Command="{Binding ScanPeersCommand}" ToolTip.Tip="Re-scan Wi-Fi, Wired LAN, and Direct Cable"/>
+                    </Grid>
+
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="NEARBY COMPUTERS" FontSize="10" FontWeight="Bold" Foreground="#64748B"/>
+                      <TextBlock Text="Scanning Wi-Fi, LAN &amp; Direct Cable..."
+                                 IsVisible="{Binding HasNoDiscoveredPeers}"
+                                 FontSize="11.5" Foreground="#64748B" Margin="2,2,0,2"/>
+                      <ItemsControl ItemsSource="{Binding DiscoveredPeers}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:PeerItemViewModel">
+                            <Button Classes="menu-item" Click="OnFlyoutNearbyPeerClick" Margin="0,0,0,4">
+                              <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel Grid.Column="0" Spacing="1">
+                                  <TextBlock Text="{Binding DeviceName}" FontSize="12.5" FontWeight="SemiBold" Foreground="#F8FAFC"
+                                             TextTrimming="CharacterEllipsis"/>
+                                  <StackPanel Orientation="Horizontal" Spacing="5">
+                                    <TextBlock Text="{Binding PrimaryEndpointLabel}" FontSize="10.5" Foreground="#94A3B8"/>
+                                    <TextBlock Text="•" FontSize="10.5" Foreground="#64748B"/>
+                                    <TextBlock Text="{Binding OsPlatform}" FontSize="10.5" Foreground="#94A3B8"/>
+                                  </StackPanel>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="8,0,0,0">
+                                  <Border Background="#064E3B" CornerRadius="5" Padding="6,2" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding LinkBadge}" FontSize="10" FontWeight="SemiBold" Foreground="#34D399"/>
+                                  </Border>
+                                  <TextBlock Text="{Binding StatusBadge}" FontSize="10.5" FontWeight="SemiBold"
+                                             Foreground="{Binding StatusBadgeBrush}" VerticalAlignment="Center"/>
+                                </StackPanel>
+                              </Grid>
+                            </Button>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+
+                    <StackPanel IsVisible="{Binding HasSavedPeers}" Spacing="4">
+                      <TextBlock Text="SAVED COMPUTERS" FontSize="10" FontWeight="Bold" Foreground="#64748B"/>
+                      <ItemsControl ItemsSource="{Binding SavedPeers}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="cfg:SavedPeerEntry">
+                            <Button Classes="menu-item" Click="OnFlyoutSavedPeerClick" Margin="0,0,0,4">
+                              <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel Grid.Column="0" Spacing="1">
+                                  <TextBlock Text="{Binding DisplayLabel}" FontSize="12" FontWeight="SemiBold" Foreground="#F8FAFC"
+                                             TextTrimming="CharacterEllipsis"/>
+                                  <StackPanel Orientation="Horizontal" Spacing="3">
+                                    <TextBlock Text="{Binding Host}" FontSize="10.5" Foreground="#94A3B8"/>
+                                    <TextBlock Text=":" FontSize="10.5" Foreground="#64748B"/>
+                                    <TextBlock Text="{Binding Port}" FontSize="10.5" Foreground="#94A3B8"/>
+                                  </StackPanel>
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" Text="Connect ›" FontSize="11" FontWeight="SemiBold" Foreground="#A78BFA"
+                                           VerticalAlignment="Center" Margin="8,0,0,0"/>
+                              </Grid>
+                            </Button>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
+
+                    <Border Height="1" Background="#1E293B" Margin="0,2"/>
+
+                    <TextBlock Text="{Binding ConnectionError}" IsVisible="{Binding HasConnectionError}"
+                               Foreground="#F87171" FontSize="11.5" TextWrapping="Wrap"/>
+
+                    <Button Classes="menu-item" Click="OnFlyoutGoManualClick">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0" Text="Enter IP / Hostname manually" FontSize="12" FontWeight="SemiBold" Foreground="#E2E8F0"
+                                   VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="1" Text="›" FontSize="15" FontWeight="Bold" Foreground="#94A3B8" VerticalAlignment="Center"/>
+                      </Grid>
+                    </Button>
+                  </StackPanel>
+
+                  <!-- STEP 1: Manual IP / Port / TLS Entry -->
+                  <StackPanel IsVisible="{Binding IsManualEntryStep}" Spacing="10">
+                    <Grid ColumnDefinitions="Auto,8,*">
+                      <Button Grid.Column="0" Content="← Back" Classes="subtle" CornerRadius="7" Padding="8,4" FontSize="11"
+                              Click="OnFlyoutBackToPickClick"/>
+                      <TextBlock Grid.Column="2" Text="Connect by IP or Hostname" FontSize="13" FontWeight="Bold" Foreground="#F8FAFC"
+                                 VerticalAlignment="Center"/>
+                    </Grid>
+
+                    <TextBox x:Name="FlyoutHostBox" Classes="pill" Text="{Binding ConnectHost}"
+                             Watermark="e.g. 192.168.1.42 or hostname"
+                             KeyDown="OnFlyoutManualKeyDown"/>
+
+                    <Grid ColumnDefinitions="*,10,Auto">
+                      <TextBox Grid.Column="0" Classes="pill" Text="{Binding ConnectPort}" Watermark="45890"
+                               KeyDown="OnFlyoutManualKeyDown"/>
+                      <CheckBox Grid.Column="2" IsChecked="{Binding ConnectUseTls}" Content="TLS 1.3" FontSize="12" VerticalAlignment="Center"/>
+                    </Grid>
+
+                    <TextBlock Text="{Binding ConnectionError}" IsVisible="{Binding HasConnectionError}"
+                               Foreground="#F87171" FontSize="11.5" TextWrapping="Wrap"/>
+
+                    <Button Content="Continue ›" Classes="primary" CornerRadius="8" Padding="14,6"
+                            HorizontalAlignment="Right" Click="OnFlyoutManualContinueClick"/>
+                  </StackPanel>
+
+                  <!-- STEP 2: Shifting Context PIN Input (shown ONLY when needed for an unsaved PC) -->
+                  <StackPanel IsVisible="{Binding IsEnterPinStep}" Spacing="10">
+                    <Grid ColumnDefinitions="Auto,8,*">
+                      <Button Grid.Column="0" Content="← Back" Classes="subtle" CornerRadius="7" Padding="8,4" FontSize="11"
+                              Click="OnFlyoutBackToPickClick"/>
+                      <TextBlock Grid.Column="2" Text="Input PIN to connect" FontSize="13" FontWeight="Bold" Foreground="#F8FAFC"
+                                 VerticalAlignment="Center"/>
+                    </Grid>
+
+                    <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="8" Padding="10,7">
+                      <StackPanel Spacing="1">
+                        <TextBlock Text="{Binding ConnectTargetDisplayName}" FontSize="12.5" FontWeight="SemiBold" Foreground="#F8FAFC"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding ConnectTargetSubtitle}" FontSize="11" Foreground="#94A3B8"
+                                   TextTrimming="CharacterEllipsis"/>
+                      </StackPanel>
+                    </Border>
+
+                    <StackPanel IsVisible="{Binding HasMultipleEndpoints}" Spacing="4">
+                      <TextBlock Text="Connection link" FontSize="11" Foreground="#94A3B8"/>
+                      <ComboBox Classes="pill" ItemsSource="{Binding SelectedPeerEndpoints}"
+                                SelectedItem="{Binding SelectedPeerEndpoint}" HorizontalAlignment="Stretch"
+                                MinHeight="30" Padding="10,4">
+                        <ComboBox.ItemTemplate>
+                          <DataTemplate x:DataType="disc:PeerEndpoint">
+                            <TextBlock Text="{Binding DisplayLabel}" FontSize="11.5"/>
+                          </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                      </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="Enter the 6-digit PIN shown on the remote computer:" FontSize="11.5" Foreground="#CBD5E1"
+                                 TextWrapping="Wrap"/>
+                      <TextBox x:Name="FlyoutPinBox" Classes="pill" Text="{Binding ConnectPin}"
+                               Watermark="000-000" FontFamily="Consolas, Monospace" FontSize="16" FontWeight="Bold"
+                               HorizontalContentAlignment="Center" KeyDown="OnFlyoutPinKeyDown"/>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                      <CheckBox IsChecked="{Binding RememberPin}" Content="Save PIN for 1-click reconnect" FontSize="11.5"/>
+                      <CheckBox IsChecked="{Binding ConnectUseTls}" Content="Encrypt (TLS 1.3)" FontSize="11.5"/>
+                    </StackPanel>
+
+                    <TextBlock Text="{Binding ConnectionError}" IsVisible="{Binding HasConnectionError}"
+                               Foreground="#F87171" FontSize="11.5" TextWrapping="Wrap"/>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                      <Button Content="Cancel" Classes="subtle" CornerRadius="8" Padding="12,6" Click="OnFlyoutCancelClick"/>
+                      <Button Content="{Binding ConnectButtonText}" Classes="primary" CornerRadius="8" Padding="16,6"
+                              Click="OnFlyoutPinConnectClick"/>
+                    </StackPanel>
+                  </StackPanel>
+                </StackPanel>
+              </Flyout>
+            </FlyoutBase.AttachedFlyout>
+
+            <StackPanel Orientation="Horizontal" Spacing="3">
+              <Button x:Name="ConnectPickerButton" Classes="pill-ghost" MaxWidth="175" Click="OnOpenConnectPickerClick"
+                      ToolTip.Tip="Choose a nearby, saved, or manual computer to connect to">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Ellipse Width="7" Height="7" Fill="#A78BFA" VerticalAlignment="Center"/>
+                  <TextBlock Text="{Binding ConnectSelectorLabel}" FontSize="11.5" FontWeight="SemiBold"
+                             TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button Content="{Binding ConnectButtonText}" Classes="primary" CornerRadius="7"
+                      Padding="11,4" FontSize="11.5" Click="OnSmartConnectClick"/>
+            </StackPanel>
+          </Border>
+
+          <!-- Connected: Bold Emerald Pill + Compact Disconnect -->
+          <Border IsVisible="{Binding IsConnected}"
+                  Background="#06372E" BorderBrush="#10B981" BorderThickness="1.2"
+                  CornerRadius="10" Padding="9,3" VerticalAlignment="Center"
+                  ToolTip.Tip="{Binding ConnectedPeerSummary}">
+            <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+              <Ellipse Width="8" Height="8" Fill="#10B981" VerticalAlignment="Center"/>
+              <TextBlock Text="{Binding ConnectedPeerShortName}" FontSize="11.5" FontWeight="SemiBold" Foreground="#ECFDF5"
+                         MaxWidth="180" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+              <Button Content="Disconnect" Classes="danger" CornerRadius="7" Padding="9,3" FontSize="11"
+                      Command="{Binding DisconnectCommand}"/>
+            </StackPanel>
+          </Border>
+        </Grid>
+
+        <!-- Right Host PIN Quick-Menu Pill & Share App Button -->
+        <StackPanel Grid.Column="6" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <Border x:Name="HostPillBorder" Classes="pill-tray" VerticalAlignment="Center">
+            <FlyoutBase.AttachedFlyout>
+              <Flyout Placement="BottomEdgeAlignedRight"
+                      FlyoutPresenterClasses="swift-popover">
+                <StackPanel Width="270" Spacing="10">
+                  <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                    <Ellipse Width="8" Height="8" Fill="{Binding ServerStatusBrush}" VerticalAlignment="Center"/>
+                    <TextBlock Text="{Binding ServerStatusText}" FontSize="11.5" Foreground="#CBD5E1"
+                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                  </StackPanel>
+
+                  <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="8" Padding="10,7">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                        <TextBlock Text="THIS PC'S PAIRING PIN" FontSize="9.5" FontWeight="Bold" Foreground="#64748B"/>
+                        <TextBlock Text="{Binding HostPinFormatted}" FontSize="16" FontWeight="Bold" Foreground="#A78BFA"
+                                   FontFamily="Consolas, Monospace"/>
+                      </StackPanel>
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <Button Content="Copy" Classes="subtle" CornerRadius="7" Padding="8,4" FontSize="11" Click="OnCopyPinClick"/>
+                        <Button Content="New" Classes="subtle" CornerRadius="7" Padding="8,4" FontSize="11" Command="{Binding RegeneratePinCommand}"/>
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+
+                  <Grid ColumnDefinitions="*,6,*">
+                    <Button Grid.Column="0" Content="{Binding ServerToggleText}" Classes="subtle" CornerRadius="8"
+                            Padding="8,6" FontSize="11.5" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                            Command="{Binding ToggleServerCommand}"/>
+                    <Button Grid.Column="2" Content="Host &amp; Settings" Classes="subtle" CornerRadius="8"
+                            Padding="8,6" FontSize="11.5" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                            Click="OnOpenHostSettingsFromMenuClick"/>
+                  </Grid>
+                </StackPanel>
+              </Flyout>
+            </FlyoutBase.AttachedFlyout>
+
+            <Button Classes="pill-ghost" Padding="8,4" Click="OnOpenHostMenuClick"
+                    ToolTip.Tip="{Binding ServerStatusText}">
+              <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <Ellipse Width="8" Height="8" Fill="{Binding ServerStatusBrush}" VerticalAlignment="Center"/>
+                <TextBlock Text="PIN" FontSize="10.5" Foreground="#94A3B8" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding HostPinFormatted}" FontSize="12" FontWeight="Bold" Foreground="#A78BFA"
+                           FontFamily="Consolas, Monospace" VerticalAlignment="Center"/>
+                <TextBlock Text="▾" FontSize="10" Foreground="#64748B" VerticalAlignment="Center"/>
+              </StackPanel>
+            </Button>
+          </Border>
+
+          <Button Content="{Binding InstallerToggleShortText}" Classes="primary" CornerRadius="9"
+                  Padding="10,5" FontSize="11.5"
+                  Command="{Binding ToggleInstallerServerCommand}"
+                  ToolTip.Tip="Start a local web page so another computer can download SwiftBeam from its browser without a USB stick"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Incoming Peer Connection / Transfer Banner (visible on Host PC when another computer connects or transfers) -->
+    <Border Grid.Row="1"
+            IsVisible="{Binding HasIncomingPeer}"
+            Background="#2E1065"
+            BorderBrush="#A78BFA"
+            BorderThickness="0,0,0,1"
+            Padding="16,8">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Ellipse Width="9" Height="9" Fill="#A78BFA" VerticalAlignment="Center"/>
+          <Border Background="#7C3AED" CornerRadius="6" Padding="8,2" VerticalAlignment="Center">
+            <TextBlock Text="{Binding IncomingPeerBadge}" FontSize="10" FontWeight="Bold" Foreground="White"/>
+          </Border>
+          <TextBlock Text="{Binding IncomingPeerSummary}" FontSize="12.5" FontWeight="SemiBold" Foreground="#F3E8FF"
+                     VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
+
+        <Button Grid.Column="1" Content="Disconnect Peer" Classes="danger" CornerRadius="8" Padding="12,4" FontSize="11.5"
+                Command="{Binding DisconnectIncomingPeersCommand}"/>
+      </Grid>
+    </Border>
+
+    <!-- 1-Click Local Installer Download Banner -->
+    <Border Grid.Row="2"
+            IsVisible="{Binding IsInstallerServerRunning}"
+            Background="#052E2B"
+            BorderBrush="#10B981"
+            BorderThickness="0,0,0,1"
+            Padding="16,8">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Border Background="#065F46" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
+            <TextBlock Text="INSTALL LINK LIVE" FontSize="10" FontWeight="Bold" Foreground="#34D399"/>
+          </Border>
+          <TextBlock Text="Open on other PC's browser:" FontSize="12" Foreground="#D1FAE5" VerticalAlignment="Center"/>
+          <SelectableTextBlock Text="{Binding InstallerUrl}" FontFamily="Consolas, Monospace" FontSize="13" FontWeight="Bold"
+                               Foreground="#A78BFA" VerticalAlignment="Center"/>
+          <TextBlock Text="{Binding InstallerStatusText}" FontSize="11" Foreground="#6EE7B7" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <Button Content="Copy URL" Classes="subtle" Padding="8,4" FontSize="11" Click="OnCopyInstallerUrlClick"/>
+          <Button Content="Copy Linux 1-Liner" Classes="subtle" Padding="8,4" FontSize="11" Click="OnCopyLinuxOneLinerClick"/>
+          <Button Content="Copy Windows 1-Liner" Classes="subtle" Padding="8,4" FontSize="11" Click="OnCopyWindowsOneLinerClick"/>
+          <Button Content="Stop" Classes="subtle" Padding="8,4" FontSize="11" Command="{Binding ToggleInstallerServerCommand}"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- GitHub Release Update Available Banner -->
+    <Border Grid.Row="3"
+            IsVisible="{Binding HasAvailableUpdate}"
+            Background="#2E1065"
+            BorderBrush="#8B5CF6"
+            BorderThickness="0,0,0,1"
+            Padding="16,8">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Border Background="#7C3AED" CornerRadius="6" Padding="8,2" VerticalAlignment="Center">
+            <TextBlock Text="UPDATE AVAILABLE" FontSize="10" FontWeight="Bold" Foreground="White"/>
+          </Border>
+          <TextBlock Text="{Binding AvailableUpdateText}" FontSize="12.5" FontWeight="SemiBold" Foreground="#F3E8FF"
+                     VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <ProgressBar IsVisible="{Binding IsDownloadingUpdate}"
+                       Classes="green" Minimum="0" Maximum="100" Value="{Binding UpdateDownloadProgress}"
+                       Width="140" Height="7" CornerRadius="4" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button Content="{Binding UpdateActionButtonText}" Classes="primary" CornerRadius="8" Padding="12,4" FontSize="11.5"
+                  Command="{Binding InstallUpdateCommand}"/>
+          <Button Content="✕" Classes="subtle" CornerRadius="6" Padding="7,3" FontSize="11"
+                  Command="{Binding DismissUpdateBannerCommand}" ToolTip.Tip="Dismiss update notice"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Compact Dismissible Error Banner -->
+    <Border Grid.Row="4"
+            IsVisible="{Binding HasConnectionError}"
+            Background="#2A1215"
+            BorderBrush="#DC2626"
+            BorderThickness="0,0,0,1"
+            Padding="14,6">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Grid.Column="0" Text="{Binding ConnectionError}" Foreground="#FCA5A5" FontSize="12"
+                   VerticalAlignment="Center" TextWrapping="Wrap"/>
+        <Button Grid.Column="1" Content="✕" Classes="subtle" CornerRadius="6" Padding="7,2" FontSize="11"
+                Margin="10,0,0,0" Command="{Binding ClearConnectionErrorCommand}" ToolTip.Tip="Dismiss"/>
+      </Grid>
+    </Border>
+
+    <!-- Main Content Area (controlled by top header pills — no wasted TabControl strip!) -->
+    <Grid Grid.Row="5" Margin="10,8,10,10">
+      <!-- VIEW 1: RustDesk-Style Dual-Pane File Transfer -->
+      <Grid x:Name="TransferWorkspaceGrid"
+            IsVisible="{Binding IsTransferTabActive}"
+            RowDefinitions="*,6,210">
+
+          <!-- ROW 0: Dual-Pane Side-by-Side File Manager (Local Left | Remote Right) -->
+          <Grid Grid.Row="0" ColumnDefinitions="*,10,*">
+            <!-- LEFT PANE: THIS COMPUTER (LOCAL) -->
+            <Border Grid.Column="0" Classes="card" Padding="10,8">
+              <Grid RowDefinitions="Auto,6,Auto,5,Auto,4,Auto,2,*">
+                <!-- Header: Computer badge + Send button on right edge (mirrored with Remote Pull!) -->
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+                  <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Border Background="#8B5CF6" CornerRadius="6" Width="26" Height="26">
+                      <PathIcon Data="M21,16H3V4H21M21,2H3C1.89,2 1,2.89 1,4V16A2,2 0 0,0 3,18H10V20H8V22H16V20H14V18H21A2,2 0 0,0 23,16V4C23,2.89 22.1,2 21,2Z"
+                                Foreground="White" Width="14" Height="14"/>
+                    </Border>
+                    <StackPanel VerticalAlignment="Center">
+                      <TextBlock Text="Local computer" FontSize="13" FontWeight="SemiBold" Foreground="#F8FAFC"/>
+                      <TextBlock Text="{Binding LocalSelectionText}" FontSize="10" Foreground="#94A3B8"/>
+                    </StackPanel>
+                  </StackPanel>
+                  <Button Grid.Column="1" Content="Send  ›" Classes="primary" Padding="14,5" FontSize="12"
+                          Command="{Binding SendSelectedCommand}"
+                          ToolTip.Tip="Send checked files/folders into the currently open Remote folder"/>
+                </Grid>
+
+                <!-- Quick Access Shortcuts + Local File Actions (New Folder, Rename, Delete) -->
+                <Grid Grid.Row="2" ColumnDefinitions="*,Auto">
+                  <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="4">
+                    <Button Content="Drives" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding LocalDrivesCommand}"/>
+                    <Button Content="Home" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding LocalHomeCommand}"/>
+                    <Button Content="Desktop" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding LocalDesktopCommand}"/>
+                    <Button Content="Downloads" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding LocalDownloadsCommand}"/>
+                    <Button Content="Documents" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding LocalDocumentsCommand}"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="3">
+                    <Button Classes="subtle" Padding="6,3" Click="OnLocalNewFolderClick" ToolTip.Tip="New Folder">
+                      <PathIcon Data="M10,4L12,6H20A2,2 0 0,1 22,8V18A2,2 0 0,1 20,20H4C2.89,20 2,19.1 2,18V6C2,4.89 2.89,4 4,4H10M15,9V12H12V14H15V17H17V14H20V12H17V9H15Z" Width="13" Height="13"/>
+                    </Button>
+                    <Button Classes="subtle" Padding="6,3" Click="OnLocalRenameClick" ToolTip.Tip="Rename selected">
+                      <PathIcon Data="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z" Width="12" Height="12"/>
+                    </Button>
+                    <Button Classes="subtle" Padding="6,3" Click="OnLocalDeleteClick" ToolTip.Tip="Delete selected">
+                      <PathIcon Data="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" Width="12" Height="12" Foreground="#F87171"/>
+                    </Button>
+                  </StackPanel>
+                </Grid>
+
+                <!-- Path & Filter bar -->
+                <Grid Grid.Row="4" ColumnDefinitions="Auto,Auto,*,Auto,105,Auto,Auto">
+                  <Button Grid.Column="0" Classes="subtle" Padding="7,4" Margin="0,0,4,0" Command="{Binding GoUpLocalCommand}" ToolTip.Tip="Up one folder">
+                    <PathIcon Data="M7.41,15.41L12,10.83L16.59,15.41L18,14L12,8L6,14L7.41,15.41Z" Width="13" Height="13"/>
+                  </Button>
+                  <Button Grid.Column="1" Classes="subtle" Padding="7,4" Margin="0,0,6,0" Command="{Binding RefreshLocalCommand}" ToolTip.Tip="Refresh">
+                    <PathIcon Data="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" Width="13" Height="13"/>
+                  </Button>
+                  <TextBox Grid.Column="2" Classes="pill" Text="{Binding LocalPathInput}" FontFamily="Consolas, Monospace" FontSize="11"
+                           Padding="9,3" MinHeight="27" Margin="0,0,4,0" KeyDown="OnLocalPathKeyDown"/>
+                  <Button Grid.Column="3" Content="Go" Classes="subtle" Padding="8,4" FontSize="11" Margin="0,0,5,0" Command="{Binding NavigateLocalInputCommand}"/>
+                  <TextBox Grid.Column="4" Classes="pill" Text="{Binding LocalSearchFilter}" Watermark="Filter..." FontSize="11"
+                           Padding="8,3" MinHeight="27" Margin="0,0,4,0"/>
+                  <Button Grid.Column="5" Content="All" Classes="subtle" Padding="6,4" FontSize="11" Margin="0,0,3,0" Command="{Binding SelectAllLocalCommand}"/>
+                  <Button Grid.Column="6" Content="None" Classes="subtle" Padding="6,4" FontSize="11" Command="{Binding ClearLocalSelectionCommand}"/>
+                </Grid>
+
+                <!-- Sortable Column Headers (click to sort ascending/descending) -->
+                <Grid Grid.Row="6" ColumnDefinitions="24,22,*,58,108,74" Margin="7,2,18,0">
+                  <Button Grid.Column="2" Content="{Binding LocalNameHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                          FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Left" Tag="Name" Click="OnSortLocalClick"/>
+                  <Border Grid.Column="3" BorderBrush="#334155" BorderThickness="1,0,0,0" Padding="5,0,0,0">
+                    <Button Content="{Binding LocalTypeHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                            FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Left" Tag="Type" Click="OnSortLocalClick"/>
+                  </Border>
+                  <Border Grid.Column="4" BorderBrush="#334155" BorderThickness="1,0,0,0" Padding="5,0,0,0">
+                    <Button Content="{Binding LocalModifiedHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                            FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Left" Tag="Modified" Click="OnSortLocalClick"/>
+                  </Border>
+                  <Border Grid.Column="5" BorderBrush="#334155" BorderThickness="1,0,0,0" Padding="5,0,0,0">
+                    <Button Content="{Binding LocalSizeHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                            FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Right" Tag="Size" Click="OnSortLocalClick"/>
+                  </Border>
+                </Grid>
+
+                <!-- Compact Local Files List -->
+                <Grid Grid.Row="8">
+                  <ListBox Classes="file-list"
+                           ItemsSource="{Binding FilteredLocalEntries}"
+                           DoubleTapped="OnLocalEntryDoubleTapped">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:RemoteEntryViewModel">
+                        <Grid ColumnDefinitions="24,22,*,52,108,74" VerticalAlignment="Center">
+                          <CheckBox Grid.Column="0" Classes="compact" IsChecked="{Binding IsSelected}" VerticalAlignment="Center"/>
+                          <PathIcon Grid.Column="1" Data="{Binding IconData}" Foreground="{Binding IconBrush}"
+                                    Width="15" Height="15" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                          <TextBlock Grid.Column="2" Text="{Binding Name}" FontSize="12" Foreground="#F1F5F9"
+                                     VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,6,0"/>
+                          <TextBlock Grid.Column="3" Text="{Binding TypeLabel}" FontSize="10" FontWeight="SemiBold"
+                                     Foreground="{Binding IconBrush}" Opacity="0.85" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                          <TextBlock Grid.Column="4" Text="{Binding ModifiedText}" FontSize="10.5" Foreground="#64748B"
+                                     VerticalAlignment="Center" Margin="5,0,0,0"/>
+                          <TextBlock Grid.Column="5" Text="{Binding SizeText}" FontSize="11" Foreground="#94A3B8"
+                                     HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                        </Grid>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+
+                  <TextBlock Text="{Binding LocalEmptyMessage}"
+                             IsVisible="{Binding HasLocalEmptyMessage}"
+                             Foreground="#64748B" FontSize="13"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
+              </Grid>
+            </Border>
+
+            <!-- RIGHT PANE: REMOTE COMPUTER -->
+            <Border Grid.Column="2" Classes="card" Padding="10,8">
+              <Grid RowDefinitions="Auto,6,Auto,5,Auto,4,Auto,2,*">
+                <!-- Header: Pull button on left edge (mirrored with Local Send!) + Remote badge -->
+                <Grid Grid.Row="0" ColumnDefinitions="Auto,10,*">
+                  <Button Grid.Column="0" Content="‹  Receive" Classes="primary" Padding="14,5" FontSize="12"
+                          Command="{Binding PullSelectedCommand}"
+                          ToolTip.Tip="Download checked remote files/folders into the currently open Local folder"/>
+                  <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Border Background="#7C3AED" CornerRadius="6" Width="26" Height="26">
+                      <PathIcon Data="M21,16H3V4H21M21,2H3C1.89,2 1,2.89 1,4V16A2,2 0 0,0 3,18H10V20H8V22H16V20H14V18H21A2,2 0 0,0 23,16V4C23,2.89 22.1,2 21,2Z"
+                                Foreground="White" Width="14" Height="14"/>
+                    </Border>
+                    <StackPanel VerticalAlignment="Center">
+                      <TextBlock Text="{Binding RemotePaneTitle}" FontSize="13" FontWeight="SemiBold" Foreground="#F8FAFC"
+                                 TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Text="{Binding RemoteSelectionText}" FontSize="10" Foreground="#94A3B8"/>
+                    </StackPanel>
+                  </StackPanel>
+                </Grid>
+
+                <!-- Remote Quick Access Shortcuts + Remote File Actions (New Folder, Rename, Delete) -->
+                <Grid Grid.Row="2" ColumnDefinitions="*,Auto" IsEnabled="{Binding IsConnected}">
+                  <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="4" IsVisible="{Binding RemoteHasFullFs}">
+                    <Button Content="Drives" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteDrivesCommand}"/>
+                    <Button Content="Home" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteHomeCommand}"/>
+                    <Button Content="Desktop" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteDesktopCommand}"/>
+                    <Button Content="Downloads" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteDownloadsCommand}"/>
+                    <Button Content="Documents" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteDocumentsCommand}"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="3" IsVisible="{Binding IsConnected}">
+                    <Button Classes="subtle" Padding="6,3" Click="OnRemoteNewFolderClick" ToolTip.Tip="New Remote Folder">
+                      <PathIcon Data="M10,4L12,6H20A2,2 0 0,1 22,8V18A2,2 0 0,1 20,20H4C2.89,20 2,19.1 2,18V6C2,4.89 2.89,4 4,4H10M15,9V12H12V14H15V17H17V14H20V12H17V9H15Z" Width="13" Height="13"/>
+                    </Button>
+                    <Button Classes="subtle" Padding="6,3" Click="OnRemoteRenameClick" ToolTip.Tip="Rename selected remote item">
+                      <PathIcon Data="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z" Width="12" Height="12"/>
+                    </Button>
+                    <Button Classes="subtle" Padding="6,3" Click="OnRemoteDeleteClick" ToolTip.Tip="Delete selected remote item(s)">
+                      <PathIcon Data="M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" Width="12" Height="12" Foreground="#F87171"/>
+                    </Button>
+                  </StackPanel>
+                </Grid>
+
+                <!-- Remote Path & Filter bar -->
+                <Grid Grid.Row="4" ColumnDefinitions="Auto,Auto,*,Auto,105,Auto,Auto" IsEnabled="{Binding IsConnected}">
+                  <Button Grid.Column="0" Classes="subtle" Padding="7,4" Margin="0,0,4,0" Command="{Binding GoUpRemoteCommand}" ToolTip.Tip="Up one folder">
+                    <PathIcon Data="M7.41,15.41L12,10.83L16.59,15.41L18,14L12,8L6,14L7.41,15.41Z" Width="13" Height="13"/>
+                  </Button>
+                  <Button Grid.Column="1" Classes="subtle" Padding="7,4" Margin="0,0,6,0" Command="{Binding RefreshRemoteCommand}" ToolTip.Tip="Refresh">
+                    <PathIcon Data="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" Width="13" Height="13"/>
+                  </Button>
+                  <TextBox Grid.Column="2" Classes="pill" Text="{Binding RemotePathInput}" FontFamily="Consolas, Monospace" FontSize="11"
+                           Padding="9,3" MinHeight="27" Margin="0,0,4,0" KeyDown="OnRemotePathKeyDown"/>
+                  <Button Grid.Column="3" Content="Go" Classes="subtle" Padding="8,4" FontSize="11" Margin="0,0,5,0" Command="{Binding NavigateRemoteInputCommand}"/>
+                  <TextBox Grid.Column="4" Classes="pill" Text="{Binding RemoteSearchFilter}" Watermark="Filter..." FontSize="11"
+                           Padding="8,3" MinHeight="27" Margin="0,0,4,0"/>
+                  <Button Grid.Column="5" Content="All" Classes="subtle" Padding="6,4" FontSize="11" Margin="0,0,3,0" Command="{Binding SelectAllRemoteCommand}"/>
+                  <Button Grid.Column="6" Content="None" Classes="subtle" Padding="6,4" FontSize="11" Command="{Binding ClearRemoteSelectionCommand}"/>
+                </Grid>
+
+                <!-- Sortable Column Headers (Remote) -->
+                <Grid Grid.Row="6" ColumnDefinitions="24,22,*,58,108,74" Margin="7,2,18,0">
+                  <Button Grid.Column="2" Content="{Binding RemoteNameHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                          FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Left" Tag="Name" Click="OnSortRemoteClick"/>
+                  <Border Grid.Column="3" BorderBrush="#334155" BorderThickness="1,0,0,0" Padding="5,0,0,0">
+                    <Button Content="{Binding RemoteTypeHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                            FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Left" Tag="Type" Click="OnSortRemoteClick"/>
+                  </Border>
+                  <Border Grid.Column="4" BorderBrush="#334155" BorderThickness="1,0,0,0" Padding="5,0,0,0">
+                    <Button Content="{Binding RemoteModifiedHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                            FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Left" Tag="Modified" Click="OnSortRemoteClick"/>
+                  </Border>
+                  <Border Grid.Column="5" BorderBrush="#334155" BorderThickness="1,0,0,0" Padding="5,0,0,0">
+                    <Button Content="{Binding RemoteSizeHeader}" Background="Transparent" BorderThickness="0" Padding="0"
+                            FontSize="11" FontWeight="SemiBold" Foreground="#94A3B8" HorizontalAlignment="Right" Tag="Size" Click="OnSortRemoteClick"/>
+                  </Border>
+                </Grid>
+
+                <!-- Compact Remote Files List (supports Drag & Drop from OS file manager) -->
+                <Grid Grid.Row="8" x:Name="RemoteDropZone" DragDrop.AllowDrop="True">
+                  <ListBox Classes="file-list"
+                           ItemsSource="{Binding FilteredRemoteEntries}"
+                           DoubleTapped="OnRemoteEntryDoubleTapped">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:RemoteEntryViewModel">
+                        <Grid ColumnDefinitions="24,22,*,52,108,74" VerticalAlignment="Center">
+                          <CheckBox Grid.Column="0" Classes="compact" IsChecked="{Binding IsSelected}" VerticalAlignment="Center"/>
+                          <PathIcon Grid.Column="1" Data="{Binding IconData}" Foreground="{Binding IconBrush}"
+                                    Width="15" Height="15" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                          <TextBlock Grid.Column="2" Text="{Binding Name}" FontSize="12" Foreground="#F1F5F9"
+                                     VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,6,0"/>
+                          <TextBlock Grid.Column="3" Text="{Binding TypeLabel}" FontSize="10" FontWeight="SemiBold"
+                                     Foreground="{Binding IconBrush}" Opacity="0.85" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                          <TextBlock Grid.Column="4" Text="{Binding ModifiedText}" FontSize="10.5" Foreground="#64748B"
+                                     VerticalAlignment="Center" Margin="5,0,0,0"/>
+                          <TextBlock Grid.Column="5" Text="{Binding SizeText}" FontSize="11" Foreground="#94A3B8"
+                                     HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                        </Grid>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+
+                  <!-- Friendly overlay when NOT connected -->
+                  <StackPanel IsVisible="{Binding IsDisconnected}"
+                              HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" Margin="24">
+                    <TextBlock Text="Not connected to a remote computer" FontSize="15" FontWeight="SemiBold"
+                               Foreground="#94A3B8" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Select a computer in the top bar and click Connect to browse its drives &amp; files."
+                               FontSize="12" Foreground="#64748B" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="360"/>
+                    <Button Content="Connect to a Computer" Classes="primary" CornerRadius="9" Padding="14,6" Margin="0,6,0,0"
+                            HorizontalAlignment="Center" Click="OnOpenConnectPickerClick"/>
+                  </StackPanel>
+
+                  <!-- Empty folder overlay when connected -->
+                  <TextBlock Text="{Binding RemoteEmptyMessage}"
+                             IsVisible="{Binding HasRemoteEmptyMessage}"
+                             Foreground="#64748B" FontSize="13"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
+              </Grid>
+            </Border>
+          </Grid>
+
+          <!-- Resizable Splitter (only when Transfer Queue is expanded) -->
+          <GridSplitter Grid.Row="1"
+                        IsVisible="{Binding IsTransferPanelExpanded}"
+                        Background="#1E293B" ResizeDirection="Rows" CornerRadius="2"/>
+
+          <!-- ROW 2: Collapsible Unified Parallel Transfer Queue (Pull + Send) -->
+          <Border Grid.Row="2" Classes="card" Padding="10,7">
+            <Grid>
+              <!-- COLLAPSED MODE: Slim Green Overall Progress Bar + Expand Toggle -->
+              <Grid IsVisible="{Binding IsTransferPanelCollapsed}" ColumnDefinitions="Auto,10,*,10,Auto" VerticalAlignment="Center">
+                <Button Grid.Column="0" Content="▴ Transfers" Classes="subtle" Padding="9,4" FontSize="11"
+                        Click="OnToggleTransferPanelClick"
+                        ToolTip.Tip="Expand transfer queue details"/>
+                <ProgressBar Grid.Column="2" Classes="green" Minimum="0" Maximum="100"
+                             Value="{Binding OverallProgressPercent}" Height="10" CornerRadius="5" VerticalAlignment="Center"/>
+                <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding AggregateSpeedText}" FontSize="11" FontWeight="Bold" Foreground="#34D399" VerticalAlignment="Center"/>
+                  <TextBlock Text="{Binding EtaText}" FontSize="11" FontWeight="SemiBold" Foreground="#A78BFA" VerticalAlignment="Center"/>
+                  <TextBlock Text="{Binding OverallProgressText}" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center"
+                             MaxWidth="320" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+              </Grid>
+
+              <!-- EXPANDED MODE: Full Telemetry + Parallel Slider + File List -->
+              <Grid IsVisible="{Binding IsTransferPanelExpanded}" RowDefinitions="Auto,6,*">
+                <!-- Compact Telemetry + Parallel Slider Bar -->
+                <Grid Grid.Row="0" ColumnDefinitions="Auto,10,*,12,Auto,12,Auto">
+                  <Button Grid.Column="0" Content="▾" Classes="subtle" Padding="8,4" FontSize="12"
+                          Click="OnToggleTransferPanelClick"
+                          ToolTip.Tip="Collapse transfer queue to compact green progress bar"/>
+
+                  <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Text="{Binding OverallProgressText}" FontSize="11" Foreground="#CBD5E1" TextTrimming="CharacterEllipsis"/>
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="{Binding AggregateSpeedText}" FontSize="12" FontWeight="Bold" Foreground="#34D399"/>
+                        <TextBlock Text="{Binding EtaText}" FontSize="12" FontWeight="SemiBold" Foreground="#A78BFA"/>
+                        <TextBlock Text="{Binding ActiveWorkersText}" FontSize="11" Foreground="#94A3B8"/>
+                      </StackPanel>
+                    </Grid>
+                    <ProgressBar Classes="green" Minimum="0" Maximum="100" Value="{Binding OverallProgressPercent}" Height="6" CornerRadius="3"/>
+                  </StackPanel>
+
+                  <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <TextBlock Text="Parallel:" FontSize="11" Foreground="#94A3B8" VerticalAlignment="Center"/>
+                    <Slider Width="105" Minimum="1" Maximum="16" IsSnapToTickEnabled="True" TickFrequency="1"
+                            Value="{Binding ParallelWorkers}" VerticalAlignment="Center"/>
+                    <Border Background="#1E293B" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding ParallelWorkersLabel}" FontSize="11" FontWeight="SemiBold" Foreground="#A78BFA"/>
+                    </Border>
+                  </StackPanel>
+
+                  <StackPanel Grid.Column="6" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                    <Button Content="Pause All" Classes="subtle" FontSize="11" Padding="8,4" Command="{Binding PauseAllCommand}"/>
+                    <Button Content="Resume All" Classes="subtle" FontSize="11" Padding="8,4" Command="{Binding ResumeAllCommand}"/>
+                    <Button Content="Cancel All" Classes="subtle" Foreground="#FCA5A5" FontSize="11" Padding="8,4" Command="{Binding CancelAllCommand}"
+                            ToolTip.Tip="Cancel and remove all active, queued, and paused transfers (keeps completed items)"/>
+                    <Button Content="Clear Done" Classes="subtle" FontSize="11" Padding="8,4" Command="{Binding ClearFinishedCommand}"/>
+                    <Button Content="Clear All" Classes="subtle" FontSize="11" Padding="8,4" Command="{Binding ClearAllTransfersCommand}"
+                            ToolTip.Tip="Cancel active transfers and clear the entire queue"/>
+                  </StackPanel>
+                </Grid>
+
+                <!-- Transfer Queue Items -->
+                <ListBox Grid.Row="2"
+                         ItemsSource="{Binding Transfers}"
+                         Background="#0B1120"
+                         BorderBrush="#1E293B"
+                         BorderThickness="1"
+                         CornerRadius="6">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:TransferItemViewModel">
+                      <Border Background="#111827" BorderBrush="#1F2937" BorderThickness="1"
+                              CornerRadius="6" Padding="8,5" Margin="0,2">
+                        <Grid RowDefinitions="Auto,3,Auto" ColumnDefinitions="*,Auto">
+                          <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                            <Border Background="#1E293B" CornerRadius="4" Padding="5,1" VerticalAlignment="Center">
+                              <TextBlock Text="{Binding DirectionBadge}" FontSize="10" FontWeight="Bold" Foreground="{Binding DirectionBrush}"/>
+                            </Border>
+                            <TextBlock Text="{Binding FileName}" FontWeight="SemiBold" FontSize="12" Foreground="#F8FAFC" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding StreamsText}" FontSize="11" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding SpeedText}" FontSize="11" Foreground="#34D399" VerticalAlignment="Center"/>
+                          </StackPanel>
+
+                          <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="4">
+                            <Button Content="Pause" Classes="subtle" Padding="6,2" FontSize="10"
+                                    IsVisible="{Binding CanPause}" Command="{Binding PauseCommand}"/>
+                            <Button Content="Resume" Classes="primary" Padding="6,2" FontSize="10"
+                                    IsVisible="{Binding CanResume}" Command="{Binding ResumeCommand}"/>
+                            <Button Content="Cancel" Classes="subtle" Padding="6,2" FontSize="10"
+                                    IsVisible="{Binding CanCancel}" Command="{Binding CancelCommand}"/>
+                          </StackPanel>
+
+                          <ProgressBar Grid.Row="1" Grid.ColumnSpan="2" Classes="green" Minimum="0" Maximum="100"
+                                       Value="{Binding ProgressPercent}" Height="4" CornerRadius="2"/>
+
+                          <Grid Grid.Row="2" Grid.ColumnSpan="2" ColumnDefinitions="*,Auto">
+                            <TextBlock Grid.Column="0" Text="{Binding StatusText}" FontSize="10"
+                                       Foreground="{Binding StatusBrush}" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Column="1" Text="{Binding SizeProgressText}" FontSize="10" Foreground="#94A3B8"/>
+                          </Grid>
+                        </Grid>
+                      </Border>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+              </Grid>
+            </Grid>
+          </Border>
+      </Grid>
+
+      <!-- VIEW 2: Host & Settings -->
+      <ScrollViewer IsVisible="{Binding IsSettingsTabActive}">
+        <Grid ColumnDefinitions="*,14,*">
+            <!-- Left: Share & Security -->
+            <Border Grid.Column="0" Classes="card" Padding="16">
+              <StackPanel Spacing="12">
+                <TextBlock Text="This Computer (Share Host)" FontSize="15" FontWeight="Bold" Foreground="#F8FAFC"/>
+
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Device Name" FontSize="12" Foreground="#94A3B8"/>
+                  <TextBox Classes="pill" Text="{Binding DeviceName}"/>
+                </StackPanel>
+
+                <CheckBox IsChecked="{Binding AllowFullFilesystemAccess}"
+                          Content="Allow paired computers to browse all drives &amp; folders (RustDesk-style, protected by PIN)"/>
+
+                <StackPanel Spacing="4" IsEnabled="{Binding !AllowFullFilesystemAccess}">
+                  <TextBlock Text="Restricted Shared Folder (only used if full drive access above is unchecked)" FontSize="12" Foreground="#94A3B8"/>
+                  <Grid ColumnDefinitions="*,8,Auto">
+                    <TextBox Grid.Column="0" Classes="pill" Text="{Binding SharedDirectory}"/>
+                    <Button Grid.Column="2" Content="Browse..." Classes="subtle" CornerRadius="8" MinHeight="34" Click="OnPickSharedFolderClick"/>
+                  </Grid>
+                </StackPanel>
+
+                <StackPanel Spacing="4">
+                  <TextBlock Text="Default Download Folder (used when pulling while on the Drives list)" FontSize="12" Foreground="#94A3B8"/>
+                  <Grid ColumnDefinitions="*,8,Auto">
+                    <TextBox Grid.Column="0" Classes="pill" Text="{Binding DownloadDirectory}"/>
+                    <Button Grid.Column="2" Content="Browse..." Classes="subtle" CornerRadius="8" MinHeight="34" Click="OnPickDownloadFolderClick"/>
+                  </Grid>
+                </StackPanel>
+
+                <Grid ColumnDefinitions="140,12,*">
+                  <StackPanel Grid.Column="0" Spacing="4">
+                    <TextBlock Text="Transfer Port" FontSize="12" Foreground="#94A3B8"/>
+                    <NumericUpDown Classes="pill" Minimum="1024" Maximum="65535" FormatString="0" Value="{Binding ListenPort}"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" Spacing="4">
+                    <TextBlock Text="Pairing PIN (6 digits)" FontSize="12" Foreground="#94A3B8"/>
+                    <Grid ColumnDefinitions="*,8,Auto">
+                      <TextBox Grid.Column="0" Classes="pill" FontFamily="Consolas, Monospace" Text="{Binding HostPin}"/>
+                      <Button Grid.Column="2" Content="Regenerate" Classes="subtle" CornerRadius="8" MinHeight="34" Command="{Binding RegeneratePinCommand}"/>
+                    </Grid>
+                  </StackPanel>
+                </Grid>
+
+                <CheckBox IsChecked="{Binding HostRequirePin}" Content="Require Pairing PIN for incoming connections"/>
+                <CheckBox IsChecked="{Binding HostAllowUnencrypted}" Content="Allow unencrypted direct-cable mode (clients can toggle TLS off for max speed)"/>
+
+                <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="10" Padding="12,9">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="Session TLS Certificate Fingerprint (ECDSA P-256)" FontSize="11" Foreground="#64748B"/>
+                    <TextBlock Text="{Binding CertFingerprint}" FontFamily="Consolas, Monospace" FontSize="12" Foreground="#A78BFA"/>
+                  </StackPanel>
+                </Border>
+
+                <Button Content="Save Settings" Classes="primary" CornerRadius="8" HorizontalAlignment="Left" Command="{Binding SaveSettingsCommand}"/>
+              </StackPanel>
+            </Border>
+
+            <!-- Right: Transfer Tuning, Installer Link & Network Interfaces -->
+            <Border Grid.Column="2" Classes="card" Padding="16">
+              <StackPanel Spacing="12">
+                <TextBlock Text="Transfer Engine &amp; Network Links" FontSize="15" FontWeight="Bold" Foreground="#F8FAFC"/>
+
+                <Grid ColumnDefinitions="*,12,*">
+                  <StackPanel Grid.Column="0" Spacing="4">
+                    <TextBlock Text="Default Parallel Streams (1–16)" FontSize="12" Foreground="#94A3B8"/>
+                    <NumericUpDown Classes="pill" Minimum="1" Maximum="16" FormatString="0" Value="{Binding ParallelWorkers}"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" Spacing="4">
+                    <TextBlock Text="Chunk Size (MB) for Large Files" FontSize="12" Foreground="#94A3B8"/>
+                    <NumericUpDown Classes="pill" Minimum="1" Maximum="64" FormatString="0" Value="{Binding ChunkSizeMb}"/>
+                  </StackPanel>
+                </Grid>
+
+                <CheckBox IsChecked="{Binding VerifySha256}" Content="Verify SHA-256 integrity after every file completes"/>
+
+                <Grid ColumnDefinitions="*,12,*">
+                  <StackPanel Grid.Column="0" Spacing="4">
+                    <TextBlock Text="When Destination File Exists" FontSize="12" Foreground="#94A3B8"/>
+                    <ComboBox Classes="pill" SelectedIndex="{Binding ConflictPolicyIndex}" HorizontalAlignment="Stretch">
+                      <ComboBoxItem Content="Skip if identical (Recommended)"/>
+                      <ComboBoxItem Content="Always overwrite"/>
+                      <ComboBoxItem Content="Keep both (auto-rename)"/>
+                    </ComboBox>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" Spacing="4">
+                    <TextBlock Text="Speed Limit (MB/s, 0 = Unlimited)" FontSize="12" Foreground="#94A3B8"/>
+                    <NumericUpDown Classes="pill" Minimum="0" Maximum="10000" FormatString="0" Value="{Binding MaxSpeedMBps}"/>
+                  </StackPanel>
+                </Grid>
+
+                <CheckBox IsChecked="{Binding MinimizeToTrayOnClose}" Content="Minimize to system tray when closing window (keeps SwiftBeam ready in background)"/>
+                <CheckBox IsChecked="{Binding NotifyOnTransferComplete}" Content="Show completion alert when transfer queue finishes"/>
+
+                <StackPanel Spacing="6" IsVisible="{Binding HasSavedPeers}">
+                  <TextBlock Text="Saved / Trusted Computers" FontSize="13" FontWeight="SemiBold" Foreground="#F8FAFC"/>
+                  <ItemsControl ItemsSource="{Binding SavedPeers}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="cfg:SavedPeerEntry">
+                        <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="10" Padding="10,6" Margin="0,0,0,4">
+                          <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="{Binding DisplayLabel}" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
+                            <Button Grid.Column="1" Content="Remove" Classes="subtle" CornerRadius="7" Padding="9,3" FontSize="10.5"
+                                    Click="OnRemoveSavedPeerClick"/>
+                          </Grid>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+
+                <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+                  <TextBlock Text="Active Network Interfaces on This Computer" FontSize="13" FontWeight="SemiBold" Foreground="#F8FAFC" VerticalAlignment="Center"/>
+                  <Button Grid.Column="1" Content="Refresh" Classes="subtle" CornerRadius="8" Padding="10,4" FontSize="11" Command="{Binding RefreshInterfacesCommand}"/>
+                </Grid>
+
+                <ItemsControl ItemsSource="{Binding LocalInterfaces}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="disc:LocalInterfaceAddress">
+                      <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="10" Padding="11,8" Margin="0,0,0,6">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                          <Border Grid.Column="0" Background="#064E3B" CornerRadius="6" Padding="7,2" Margin="0,0,10,0" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding LinkBadge}" FontSize="10" FontWeight="SemiBold" Foreground="#34D399"/>
+                          </Border>
+                          <StackPanel Grid.Column="1">
+                            <TextBlock Text="{Binding DisplayAddress}" FontFamily="Consolas, Monospace" FontSize="12" Foreground="#F8FAFC"/>
+                            <TextBlock Text="{Binding InterfaceName}" FontSize="11" Foreground="#64748B"/>
+                          </StackPanel>
+                          <TextBlock Grid.Column="2" Text="{Binding SpeedLabel}" FontSize="11" Foreground="#A78BFA" VerticalAlignment="Center"/>
+                        </Grid>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <Border Background="#0B1120" BorderBrush="#3B2466" BorderThickness="1" CornerRadius="10" Padding="12">
+                  <StackPanel Spacing="6">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel>
+                        <TextBlock Text="Install on Another Computer (No USB Needed)" FontSize="13" FontWeight="SemiBold" Foreground="#34D399"/>
+                        <TextBlock Text="{Binding InstallerStatusText}" FontSize="11" Foreground="#94A3B8"/>
+                      </StackPanel>
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <Button Content="Binaries Folder..." Classes="subtle" CornerRadius="8" Padding="9,4" FontSize="11" Click="OnPickInstallerBinariesClick"/>
+                        <Button Content="{Binding InstallerToggleText}" Classes="primary" CornerRadius="8" Padding="11,5" FontSize="11"
+                                Command="{Binding ToggleInstallerServerCommand}"/>
+                      </StackPanel>
+                    </Grid>
+                    <ItemsControl ItemsSource="{Binding InstallerUrls}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                          <SelectableTextBlock Text="{Binding}" FontFamily="Consolas, Monospace" FontSize="11" Foreground="#A78BFA" Margin="0,1"/>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                </Border>
+
+                <Border Background="#0B1120" BorderBrush="#3B2466" BorderThickness="1" CornerRadius="10" Padding="12">
+                  <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel>
+                        <TextBlock Text="Software Updates (GitHub Releases)" FontSize="13" FontWeight="SemiBold" Foreground="#C4B5FD"/>
+                        <TextBlock Text="{Binding UpdateStatusText}" FontSize="11" Foreground="#94A3B8" TextWrapping="Wrap"/>
+                      </StackPanel>
+                      <Border Grid.Column="1" Background="#2E1065" CornerRadius="6" Padding="8,3" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding AppVersionText}" FontFamily="Consolas, Monospace" FontSize="11.5" FontWeight="Bold" Foreground="#DDD6FE"/>
+                      </Border>
+                    </Grid>
+
+                    <CheckBox IsChecked="{Binding AutoCheckUpdates}" Content="Check GitHub for updates automatically on startup"/>
+
+                    <Grid ColumnDefinitions="*,8,Auto,6,Auto" VerticalAlignment="Center">
+                      <TextBox Grid.Column="0" Classes="pill" Text="{Binding UpdateRepo}" Watermark="owner/repo (e.g. Cathildros/SwiftBeam)"/>
+                      <Button Grid.Column="2" Content="{Binding UpdateCheckButtonText}" Classes="subtle" CornerRadius="8" MinHeight="34" Padding="12,5" FontSize="11.5"
+                              Command="{Binding CheckForUpdatesCommand}"/>
+                      <Button Grid.Column="4" Content="{Binding UpdateActionButtonText}" Classes="primary" CornerRadius="8" MinHeight="34" Padding="12,5" FontSize="11.5"
+                              IsVisible="{Binding HasAvailableUpdate}" Command="{Binding InstallUpdateCommand}"/>
+                    </Grid>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+            </Border>
+          </Grid>
+      </ScrollViewer>
+
+      <!-- VIEW 3: Activity Log -->
+      <Border IsVisible="{Binding IsLogTabActive}" Classes="card" Padding="12">
+        <ListBox ItemsSource="{Binding LogEntries}"
+                 Background="#0B1120"
+                 BorderBrush="#1E293B"
+                 BorderThickness="1"
+                 CornerRadius="6"
+                 FontFamily="Consolas, Monospace"
+                 FontSize="12"/>
+      </Border>
+
+      <!-- Completion / Action Toast Notification -->
+      <Border IsVisible="{Binding IsToastVisible}"
+              Background="#064E3B"
+              BorderBrush="#10B981"
+              BorderThickness="1.5"
+              CornerRadius="10"
+              Padding="14,9"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Bottom"
+              Margin="0,0,12,12">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Ellipse Width="9" Height="9" Fill="#34D399" VerticalAlignment="Center"/>
+          <TextBlock Text="{Binding ToastMessage}" FontSize="12.5" FontWeight="SemiBold" Foreground="#ECFDF5" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

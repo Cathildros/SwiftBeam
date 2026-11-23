@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SwiftBeam.Core/SwiftBeam.Core.csproj" />
+    <Project Path="src/SwiftBeam.Desktop/SwiftBeam.Desktop.csproj" />
+    <Project Path="src/SwiftBeam.Cli/SwiftBeam.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SwiftBeam.Core.Tests/SwiftBeam.Core.Tests.csproj" />
+  </Folder>
+</Solution>

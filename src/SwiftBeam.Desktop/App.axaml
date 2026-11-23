@@ -1,0 +1,184 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="SwiftBeam.Desktop.App"
+             RequestedThemeVariant="Dark">
+  <Application.Styles>
+    <FluentTheme />
+    <Style Selector="Button.primary">
+      <Setter Property="Background" Value="#8B5CF6"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="14,7"/>
+    </Style>
+    <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#A78BFA"/>
+    </Style>
+    <Style Selector="Button.danger">
+      <Setter Property="Background" Value="#DC2626"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="14,7"/>
+    </Style>
+    <Style Selector="Button.danger:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#EF4444"/>
+    </Style>
+    <Style Selector="Button.success">
+      <Setter Property="Background" Value="#059669"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="14,7"/>
+    </Style>
+    <Style Selector="Button.success:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#10B981"/>
+    </Style>
+    <Style Selector="Button.subtle">
+      <Setter Property="Background" Value="#1E293B"/>
+      <Setter Property="Foreground" Value="#E2E8F0"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="10,6"/>
+    </Style>
+    <Style Selector="Button.subtle:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#334155"/>
+    </Style>
+    <Style Selector="Button.nav">
+      <Setter Property="CornerRadius" Value="7"/>
+      <Setter Property="Padding" Value="12,5"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <!-- Recessed Rounded Pill Inputs (matches the top navigation bar styling) -->
+    <Style Selector="TextBox.pill">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#1E293B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="11,6"/>
+      <Setter Property="MinHeight" Value="34"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Foreground" Value="#F1F5F9"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style Selector="TextBox.pill:pointerover /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#0F172A"/>
+      <Setter Property="BorderBrush" Value="#334155"/>
+    </Style>
+    <Style Selector="TextBox.pill:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#8B5CF6"/>
+      <Setter Property="BorderThickness" Value="1.5"/>
+    </Style>
+    <Style Selector="ComboBox.pill">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#1E293B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="11,5"/>
+      <Setter Property="MinHeight" Value="34"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Foreground" Value="#F1F5F9"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style Selector="ComboBox.pill:pointerover /template/ Border#Background">
+      <Setter Property="Background" Value="#0F172A"/>
+      <Setter Property="BorderBrush" Value="#334155"/>
+    </Style>
+    <Style Selector="NumericUpDown.pill">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#1E293B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="MinHeight" Value="34"/>
+      <Setter Property="Foreground" Value="#F1F5F9"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style Selector="NumericUpDown.pill:pointerover">
+      <Setter Property="Background" Value="#0F172A"/>
+      <Setter Property="BorderBrush" Value="#334155"/>
+    </Style>
+    <Style Selector="NumericUpDown.pill:focus-within">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#8B5CF6"/>
+    </Style>
+    <Style Selector="Border.pill-tray">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#1E293B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="3"/>
+    </Style>
+    <Style Selector="ProgressBar.green">
+      <Setter Property="Foreground" Value="#10B981"/>
+      <Setter Property="Background" Value="#1E293B"/>
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="#111827"/>
+      <Setter Property="BorderBrush" Value="#1F2937"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="12"/>
+    </Style>
+    <!-- Compact RustDesk-style file list rows -->
+    <Style Selector="ListBox.file-list">
+      <Setter Property="Background" Value="#0D1321"/>
+      <Setter Property="BorderBrush" Value="#1E293B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="6"/>
+      <Setter Property="Padding" Value="3"/>
+    </Style>
+    <Style Selector="ListBox.file-list ListBoxItem">
+      <Setter Property="Padding" Value="4,2,8,2"/>
+      <Setter Property="Margin" Value="0,1,0,0"/>
+      <Setter Property="MinHeight" Value="24"/>
+      <Setter Property="Background" Value="#151C2C"/>
+      <Setter Property="CornerRadius" Value="4"/>
+    </Style>
+    <Style Selector="ListBox.file-list ListBoxItem:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#1E293B"/>
+    </Style>
+    <Style Selector="ListBox.file-list ListBoxItem:selected /template/ ContentPresenter">
+      <Setter Property="Background" Value="#3B2466"/>
+    </Style>
+    <Style Selector="CheckBox.compact">
+      <Setter Property="MinHeight" Value="16"/>
+      <Setter Property="MinWidth" Value="16"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Margin" Value="0"/>
+    </Style>
+    <!-- Anchored Top-Bar Popovers & Shifting Context Menu Items -->
+    <Style Selector="FlyoutPresenter.swift-popover">
+      <Setter Property="Background" Value="#0F172A"/>
+      <Setter Property="BorderBrush" Value="#334155"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="12"/>
+      <Setter Property="Padding" Value="12"/>
+    </Style>
+    <Style Selector="Button.menu-item">
+      <Setter Property="Background" Value="#0B1120"/>
+      <Setter Property="BorderBrush" Value="#1E293B"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="10,7"/>
+      <Setter Property="HorizontalAlignment" Value="Stretch"/>
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="Foreground" Value="#F1F5F9"/>
+    </Style>
+    <Style Selector="Button.menu-item:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#1E293B"/>
+      <Setter Property="BorderBrush" Value="#A78BFA"/>
+    </Style>
+    <Style Selector="Button.pill-ghost">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="CornerRadius" Value="7"/>
+      <Setter Property="Padding" Value="9,4"/>
+      <Setter Property="Foreground" Value="#E2E8F0"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style Selector="Button.pill-ghost:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#1E293B"/>
+    </Style>
+  </Application.Styles>
+</Application>
