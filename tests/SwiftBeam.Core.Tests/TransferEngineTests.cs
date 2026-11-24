@@ -1206,29 +1206,50 @@ public sealed class TransferEngineTests : IDisposable
     [Fact]
     public async Task TransferManager_MoveToTopAndRetryAllFailed_ReordersAndResumes()
     {
+        // Part 1: Deterministic queue reordering on paused items (zero worker race)
+        string queueFile = Path.Combine(_rootTemp, "reorder-queue.json");
+        await File.WriteAllTextAsync(queueFile, System.Text.Json.JsonSerializer.Serialize(new[]
+        {
+            new PersistedTransferItem(TransferDirection.Pull, "a.bin", Path.Combine(_downloadDir, "a.bin"), 1024, DateTime.UtcNow, 262144),
+            new PersistedTransferItem(TransferDirection.Pull, "b.bin", Path.Combine(_downloadDir, "b.bin"), 1024, DateTime.UtcNow, 262144),
+            new PersistedTransferItem(TransferDirection.Pull, "c.bin", Path.Combine(_downloadDir, "c.bin"), 1024, DateTime.UtcNow, 262144)
+        }));
+
+        await using (var reorderManager = new TransferManager())
+        {
+            Assert.Equal(3, reorderManager.LoadPendingQueue(queueFile));
+            var initial = reorderManager.GetItemsSnapshot();
+            var lastItem = initial[2];
+            Assert.True(reorderManager.MoveToTop(lastItem));
+            var reordered = reorderManager.GetItemsSnapshot();
+            Assert.Equal(lastItem.Id, reordered[0].Id);
+        }
+
+        // Part 2: Deterministic RetryAllFailed recovery after fixing PIN
+        string retrySrc = Path.Combine(_shareDir, "retry_ok.bin");
+        string expectedHash = CreateRandomFile(retrySrc, 64 * 1024);
+
         await using var server = CreateServer(pin: "998877", allowUnencrypted: true);
         server.Start();
 
         await using var manager = new TransferManager { MaxConcurrency = 1 };
         manager.ConfigureTarget(new ConnectionTarget("127.0.0.1", server.ListeningPort, "000000", UseTls: false, "RetryClient"));
 
-        var itemFail = manager.EnqueueFile(new RemoteEntry("fail.bin", "fail.bin", false, 1024, DateTime.UtcNow), Path.Combine(_downloadDir, "fail.bin"));
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await manager.WaitForAllAsync(cts.Token);
+        var fi = new FileInfo(retrySrc);
+        string retryDest = Path.Combine(_downloadDir, "retry_ok.bin");
+        var itemFail = manager.EnqueueFile(new RemoteEntry("retry_ok.bin", "retry_ok.bin", false, fi.Length, fi.LastWriteTimeUtc), retryDest);
+        using (var cts1 = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            await manager.WaitForAllAsync(cts1.Token);
         Assert.Equal(TransferStatus.Failed, itemFail.Status);
 
-        var item1 = manager.EnqueueFile(new RemoteEntry("a.bin", "a.bin", false, 1024, DateTime.UtcNow), Path.Combine(_downloadDir, "a.bin"));
-        var item3 = manager.EnqueueFile(new RemoteEntry("c.bin", "c.bin", false, 1024, DateTime.UtcNow), Path.Combine(_downloadDir, "c.bin"));
-        manager.PauseItem(item1);
-        manager.PauseItem(item3);
-
-        Assert.True(manager.MoveToTop(item3));
-        var snap = manager.GetItemsSnapshot();
-        Assert.Equal(item3.Id, snap[0].Id);
-
+        manager.ConfigureTarget(new ConnectionTarget("127.0.0.1", server.ListeningPort, "998877", UseTls: false, "RetryClient"));
         int retried = manager.RetryAllFailed();
         Assert.Equal(1, retried);
-        Assert.NotEqual(TransferStatus.Failed, itemFail.Status);
+
+        using (var cts2 = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            await manager.WaitForAllAsync(cts2.Token);
+        Assert.Equal(TransferStatus.Completed, itemFail.Status);
+        Assert.Equal(expectedHash, ComputeSha256(retryDest));
     }
 
     [Fact]
