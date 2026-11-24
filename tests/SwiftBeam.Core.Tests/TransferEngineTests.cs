@@ -1317,6 +1317,37 @@ public sealed class TransferEngineTests : IDisposable
         Assert.Equal($"id-{TransferHistoryStore.MaxEntries + 14}", loaded[0].Id);
     }
 
+    [Fact]
+    public async Task DeleteFolder_ClearsReadOnlyAttributesAndEvictsHandles()
+    {
+        string remoteFolder = Path.Combine(_shareDir, "ro_tree");
+        string remoteNested = Path.Combine(remoteFolder, "nested");
+        Directory.CreateDirectory(remoteNested);
+        string remoteRoFile = Path.Combine(remoteNested, "locked.txt");
+        await File.WriteAllTextAsync(remoteRoFile, "readonly");
+        File.SetAttributes(remoteRoFile, FileAttributes.ReadOnly);
+
+        await using var server = CreateServer(pin: "667788", allowUnencrypted: true);
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "667788", UseTls: false, "DeleteClient");
+        await using var client = new TransferClient();
+        await client.ConnectAsync(target);
+
+        var resp = await client.DeletePathAsync("ro_tree");
+        Assert.True(resp.Success, resp.Error);
+        Assert.False(Directory.Exists(remoteFolder));
+
+        string localFolder = Path.Combine(_rootTemp, "local_ro_tree", "sub");
+        Directory.CreateDirectory(localFolder);
+        string localRoFile = Path.Combine(localFolder, "attr.txt");
+        await File.WriteAllTextAsync(localRoFile, "ro");
+        File.SetAttributes(localRoFile, FileAttributes.ReadOnly);
+
+        FileShareServer.DeleteFileOrDirectoryRobust(Path.Combine(_rootTemp, "local_ro_tree"));
+        Assert.False(Directory.Exists(Path.Combine(_rootTemp, "local_ro_tree")));
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }

@@ -993,17 +993,16 @@ public sealed class FileShareServer : IAsyncDisposable
 
         try
         {
-            EvictPullHandle(fullPath);
+            EvictCachedHandles(fullPath);
             if (File.Exists(fullPath))
             {
-                File.Delete(fullPath);
+                DeleteFileOrDirectoryRobust(fullPath);
                 Log?.Invoke($"Deleted file: {Path.GetFileName(fullPath)}");
                 return new DeletePathResponseMessage(true);
             }
             if (Directory.Exists(fullPath))
             {
-                EvictPullHandlesUnderDirectory(fullPath);
-                Directory.Delete(fullPath, recursive: true);
+                DeleteFileOrDirectoryRobust(fullPath);
                 Log?.Invoke($"Deleted folder: {Path.GetFileName(trimmed)}");
                 return new DeletePathResponseMessage(true);
             }
@@ -1033,7 +1032,7 @@ public sealed class FileShareServer : IAsyncDisposable
         string newFullPath = Path.Combine(parentDir, newName);
         try
         {
-            EvictPullHandle(fullPath);
+            EvictCachedHandles(fullPath);
             if (File.Exists(fullPath))
             {
                 File.Move(fullPath, newFullPath, overwrite: false);
@@ -1041,7 +1040,6 @@ public sealed class FileShareServer : IAsyncDisposable
             }
             if (Directory.Exists(fullPath))
             {
-                EvictPullHandlesUnderDirectory(fullPath);
                 Directory.Move(fullPath, newFullPath);
                 return new RenamePathResponseMessage(true, FormatWirePath(newFullPath));
             }
@@ -1053,28 +1051,134 @@ public sealed class FileShareServer : IAsyncDisposable
         }
     }
 
-    private void EvictPullHandle(string fullPath)
+    public void EvictCachedHandles(string fullPath)
     {
-        if (_activePullHandles.TryRemove(fullPath, out var entry))
-        {
-            try { entry.Handle.Dispose(); } catch { }
-        }
-    }
+        if (string.IsNullOrWhiteSpace(fullPath))
+            return;
 
-    private void EvictPullHandlesUnderDirectory(string dirPath)
-    {
-        string prefix = dirPath.EndsWith(Path.DirectorySeparatorChar) ? dirPath : dirPath + Path.DirectorySeparatorChar;
+        string norm = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string prefix = norm + Path.DirectorySeparatorChar;
+        string prefixAlt = norm + Path.AltDirectorySeparatorChar;
+
+        bool Matches(string key) =>
+            key.Equals(fullPath, StringComparison.OrdinalIgnoreCase) ||
+            key.Equals(norm, StringComparison.OrdinalIgnoreCase) ||
+            key.Equals(norm + ".sbpart", StringComparison.OrdinalIgnoreCase) ||
+            key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            key.StartsWith(prefixAlt, StringComparison.OrdinalIgnoreCase);
+
         foreach (var kv in _activePullHandles)
         {
-            if (kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            if (Matches(kv.Key) && _activePullHandles.TryRemove(kv.Key, out var entry))
             {
-                if (_activePullHandles.TryRemove(kv.Key, out var entry))
-                {
-                    try { entry.Handle.Dispose(); } catch { }
-                }
+                try { entry.Handle.Dispose(); } catch { }
+            }
+        }
+
+        foreach (var kv in _activePushHandles)
+        {
+            if (Matches(kv.Key) && _activePushHandles.TryRemove(kv.Key, out var entry))
+            {
+                try { entry.Handle.Dispose(); } catch { }
             }
         }
     }
+
+    public static void DeleteFileOrDirectoryRobust(string fullPath)
+    {
+        string trimmed = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        try
+        {
+            if (File.Exists(fullPath))
+            {
+                DeleteSingleFileWithRetry(fullPath);
+                return;
+            }
+
+            if (Directory.Exists(fullPath))
+            {
+                if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+                {
+                    Directory.Delete(fullPath, recursive: false);
+                    return;
+                }
+
+                DeleteDirectoryRecursiveRobust(fullPath);
+            }
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new UnauthorizedAccessException(
+                $"Access denied for '{Path.GetFileName(trimmed)}' — a file may be open in another app or protected by OS permissions.",
+                ex);
+        }
+    }
+
+    private static void DeleteDirectoryRecursiveRobust(string dirPath)
+    {
+        try
+        {
+            var attrs = File.GetAttributes(dirPath);
+            if ((attrs & FileAttributes.ReparsePoint) != 0)
+            {
+                Directory.Delete(dirPath, recursive: false);
+                return;
+            }
+            if ((attrs & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(dirPath, FileAttributes.Normal);
+        }
+        catch { }
+
+        foreach (string file in Directory.EnumerateFiles(dirPath))
+            DeleteSingleFileWithRetry(file);
+
+        foreach (string subDir in Directory.EnumerateDirectories(dirPath))
+            DeleteDirectoryRecursiveRobust(subDir);
+
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                try
+                {
+                    if ((File.GetAttributes(dirPath) & FileAttributes.ReadOnly) != 0)
+                        File.SetAttributes(dirPath, FileAttributes.Normal);
+                }
+                catch { }
+                Directory.Delete(dirPath, recursive: false);
+                return;
+            }
+            catch (Exception ex) when (attempt < 2 && ex is UnauthorizedAccessException or IOException)
+            {
+                Thread.Sleep(80);
+            }
+        }
+    }
+
+    private static void DeleteSingleFileWithRetry(string filePath)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                try
+                {
+                    var attrs = File.GetAttributes(filePath);
+                    if ((attrs & FileAttributes.ReadOnly) != 0)
+                        File.SetAttributes(filePath, FileAttributes.Normal);
+                }
+                catch { }
+                File.Delete(filePath);
+                return;
+            }
+            catch (Exception ex) when (attempt < 2 && ex is UnauthorizedAccessException or IOException)
+            {
+                Thread.Sleep(80);
+            }
+        }
+    }
+
+    private void EvictPullHandle(string fullPath) => EvictCachedHandles(fullPath);
 
     private async Task<FileInfoResponseMessage> HandleFileInfoAsync(FileInfoRequestMessage req, CancellationToken ct)
     {

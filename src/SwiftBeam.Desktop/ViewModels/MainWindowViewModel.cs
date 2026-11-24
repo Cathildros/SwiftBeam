@@ -2285,6 +2285,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (item is null) return;
         try
         {
+            _server.EvictCachedHandles(item.RelativePath);
             string? parent = Path.GetDirectoryName(item.RelativePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
             if (string.IsNullOrEmpty(parent)) return;
             string dest = Path.Combine(parent, newName);
@@ -2303,8 +2304,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             try
             {
-                if (item.IsDirectory) Directory.Delete(item.RelativePath, recursive: true);
-                else File.Delete(item.RelativePath);
+                _server.EvictCachedHandles(item.RelativePath);
+                FileShareServer.DeleteFileOrDirectoryRobust(item.RelativePath);
             }
             catch (Exception ex) { ConnectionError = $"Delete failed ({item.Name}): {ex.Message}"; }
         }
