@@ -25,6 +25,12 @@ public sealed class SavedPeerEntry
         : $"★ {DeviceName} ({Host})";
 }
 
+public sealed class PinnedFolderEntry
+{
+    public string Name { get; set; } = string.Empty;
+    public string Path { get; set; } = string.Empty;
+}
+
 public sealed class AppSettings
 {
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -52,6 +58,9 @@ public sealed class AppSettings
     public bool UseSmartCompression { get; set; } = false;
     public bool PreventSleepDuringTransfers { get; set; } = true;
     public bool StartWithSystem { get; set; } = false;
+    public bool ShowHiddenFiles { get; set; } = false;
+    public List<PinnedFolderEntry> PinnedLocalFolders { get; set; } = [];
+    public Dictionary<string, List<PinnedFolderEntry>> PinnedRemoteFoldersByPeer { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<SavedPeerEntry> SavedPeers { get; set; } = [];
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -72,6 +81,12 @@ public sealed class AppSettings
     {
         string dir = Path.GetDirectoryName(GetSettingsFilePath()) ?? AppDomain.CurrentDomain.BaseDirectory;
         return Path.Combine(dir, "pending-queue.json");
+    }
+
+    public static string GetHistoryFilePath()
+    {
+        string dir = Path.GetDirectoryName(GetSettingsFilePath()) ?? AppDomain.CurrentDomain.BaseDirectory;
+        return Path.Combine(dir, "history.json");
     }
 
     public static string GetDefaultShareDir()

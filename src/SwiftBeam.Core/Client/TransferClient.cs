@@ -139,13 +139,13 @@ public sealed class TransferClient : IAsyncDisposable
         }
     }
 
-    public async Task<ListDirResponseMessage> ListDirectoryAsync(string relativePath, bool recursive = false, CancellationToken ct = default)
+    public async Task<ListDirResponseMessage> ListDirectoryAsync(string relativePath, bool recursive = false, bool includeHidden = false, CancellationToken ct = default)
     {
         await _ioLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var stream = EnsureStream();
-            await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.ListDirRequest, new ListDirRequestMessage(relativePath, recursive), ct).ConfigureAwait(false);
+            await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.ListDirRequest, new ListDirRequestMessage(relativePath, recursive, includeHidden), ct).ConfigureAwait(false);
             return await FrameProtocol.ReadJsonFrameAsync<ListDirResponseMessage>(stream, FrameType.ListDirResponse, ct).ConfigureAwait(false);
         }
         finally
@@ -459,6 +459,41 @@ public sealed class TransferClient : IAsyncDisposable
         {
             _ioLock.Release();
         }
+    }
+
+    public async Task<(byte[] Data, long TotalFileSize, bool Truncated)> ReadFilePreviewAsync(
+        string remoteRelativePath,
+        int maxBytes = 262_144,
+        CancellationToken ct = default)
+    {
+        var info = await GetFileInfoAsync(remoteRelativePath, includeSha256: false, ct).ConfigureAwait(false);
+        if (!info.Exists)
+            throw new FileNotFoundException($"Remote file not found: {remoteRelativePath}");
+
+        if (info.Size == 0)
+            return ([], 0, false);
+
+        int toRead = (int)Math.Min(info.Size, maxBytes);
+        byte[] buffer = new byte[toRead];
+
+        var header = await PullRangeAsync(
+            remoteRelativePath,
+            0,
+            toRead,
+            (chunk, writeOffset, _) =>
+            {
+                int destOffset = (int)writeOffset;
+                if (destOffset >= 0 && destOffset + chunk.Length <= buffer.Length)
+                    chunk.CopyTo(buffer.AsMemory(destOffset));
+                return ValueTask.CompletedTask;
+            },
+            ct,
+            allowCompression: true).ConfigureAwait(false);
+
+        if (!header.Success)
+            throw new IOException(header.Error ?? "Could not read remote file preview.");
+
+        return (buffer, info.Size, info.Size > toRead);
     }
 
     public async Task<bool> PingAsync(CancellationToken ct = default)

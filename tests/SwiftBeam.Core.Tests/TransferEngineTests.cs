@@ -4,6 +4,7 @@ using SwiftBeam.Core.Discovery;
 using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Security;
 using SwiftBeam.Core.Server;
+using SwiftBeam.Core.Settings;
 using SwiftBeam.Core.Updates;
 using Xunit;
 
@@ -1148,6 +1149,151 @@ public sealed class TransferEngineTests : IDisposable
         Assert.All(snap, item => Assert.Equal(TransferStatus.Paused, item.Status));
         Assert.Contains(snap, x => x.Direction == TransferDirection.Pull && x.RemoteRelativePath == "missing_yet.bin");
         Assert.Contains(snap, x => x.Direction == TransferDirection.Push && x.LocalDestinationPath == localPushSrc);
+    }
+
+    [Fact]
+    public async Task ListDirectory_ReturnsDiskSpaceAndRespectsIncludeHiddenFlag()
+    {
+        string visibleFile = Path.Combine(_shareDir, "visible.txt");
+        string hiddenDotFile = Path.Combine(_shareDir, ".env");
+        await File.WriteAllTextAsync(visibleFile, "ok");
+        await File.WriteAllTextAsync(hiddenDotFile, "SECRET=1");
+
+        await using var server = CreateServer(pin: "334455", allowUnencrypted: true);
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "334455", UseTls: false, "HiddenClient");
+        await using var client = new TransferClient();
+        await client.ConnectAsync(target);
+
+        var defList = await client.ListDirectoryAsync(_shareDir.Replace('\\', '/'), recursive: false, includeHidden: false);
+        Assert.Null(defList.Error);
+        Assert.True(defList.FreeDiskBytes is > 0);
+        Assert.Contains(defList.Entries, x => x.Name == "visible.txt" && !x.IsHidden);
+        Assert.DoesNotContain(defList.Entries, x => x.Name == ".env");
+
+        var fullList = await client.ListDirectoryAsync(_shareDir.Replace('\\', '/'), recursive: false, includeHidden: true);
+        Assert.Contains(fullList.Entries, x => x.Name == ".env" && x.IsHidden);
+    }
+
+    [Fact]
+    public async Task ReadFilePreviewAsync_ReturnsBoundedPrefixAndTruncatedFlag()
+    {
+        string bigText = Path.Combine(_shareDir, "preview_big.txt");
+        string smallText = Path.Combine(_shareDir, "preview_small.txt");
+        await File.WriteAllTextAsync(bigText, new string('A', 600) + new string('B', 600));
+        await File.WriteAllTextAsync(smallText, "Hello Preview");
+
+        await using var server = CreateServer(pin: "445566", allowUnencrypted: true);
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "445566", UseTls: false, "PreviewClient");
+        await using var client = new TransferClient();
+        await client.ConnectAsync(target);
+
+        var (bigData, bigSize, bigTrunc) = await client.ReadFilePreviewAsync(bigText.Replace('\\', '/'), maxBytes: 512);
+        Assert.True(bigTrunc);
+        Assert.Equal(1200, bigSize);
+        Assert.Equal(512, bigData.Length);
+        Assert.All(bigData, b => Assert.Equal((byte)'A', b));
+
+        var (smallData, smallSize, smallTrunc) = await client.ReadFilePreviewAsync(smallText.Replace('\\', '/'), maxBytes: 512);
+        Assert.False(smallTrunc);
+        Assert.Equal(13, smallSize);
+        Assert.Equal("Hello Preview", System.Text.Encoding.UTF8.GetString(smallData));
+    }
+
+    [Fact]
+    public async Task TransferManager_MoveToTopAndRetryAllFailed_ReordersAndResumes()
+    {
+        await using var server = CreateServer(pin: "998877", allowUnencrypted: true);
+        server.Start();
+
+        await using var manager = new TransferManager { MaxConcurrency = 1 };
+        manager.ConfigureTarget(new ConnectionTarget("127.0.0.1", server.ListeningPort, "000000", UseTls: false, "RetryClient"));
+
+        var itemFail = manager.EnqueueFile(new RemoteEntry("fail.bin", "fail.bin", false, 1024, DateTime.UtcNow), Path.Combine(_downloadDir, "fail.bin"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await manager.WaitForAllAsync(cts.Token);
+        Assert.Equal(TransferStatus.Failed, itemFail.Status);
+
+        var item1 = manager.EnqueueFile(new RemoteEntry("a.bin", "a.bin", false, 1024, DateTime.UtcNow), Path.Combine(_downloadDir, "a.bin"));
+        var item3 = manager.EnqueueFile(new RemoteEntry("c.bin", "c.bin", false, 1024, DateTime.UtcNow), Path.Combine(_downloadDir, "c.bin"));
+        manager.PauseItem(item1);
+        manager.PauseItem(item3);
+
+        Assert.True(manager.MoveToTop(item3));
+        var snap = manager.GetItemsSnapshot();
+        Assert.Equal(item3.Id, snap[0].Id);
+
+        int retried = manager.RetryAllFailed();
+        Assert.Equal(1, retried);
+        Assert.NotEqual(TransferStatus.Failed, itemFail.Status);
+    }
+
+    [Fact]
+    public void FolderSyncPlanner_ComputesLocalToRemoteRemoteToLocalAndTwoWayDiffs()
+    {
+        string localSync = Path.Combine(_rootTemp, "sync_local");
+        Directory.CreateDirectory(localSync);
+
+        DateTime baseUtc = new(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        File.WriteAllText(Path.Combine(localSync, "same.txt"), "same");
+        File.SetLastWriteTimeUtc(Path.Combine(localSync, "same.txt"), baseUtc);
+
+        File.WriteAllText(Path.Combine(localSync, "only_local.txt"), "local-only");
+        File.WriteAllText(Path.Combine(localSync, "newer_local.txt"), "newer-local-content");
+        File.SetLastWriteTimeUtc(Path.Combine(localSync, "newer_local.txt"), baseUtc.AddMinutes(5));
+
+        File.WriteAllText(Path.Combine(localSync, "newer_remote.txt"), "old");
+        File.SetLastWriteTimeUtc(Path.Combine(localSync, "newer_remote.txt"), baseUtc);
+
+        var remoteEntries = new List<RemoteEntry>
+        {
+            new("same.txt", "/remote/same.txt", false, 4, baseUtc),
+            new("only_remote.txt", "/remote/only_remote.txt", false, 99, baseUtc),
+            new("newer_local.txt", "/remote/newer_local.txt", false, 5, baseUtc),
+            new("newer_remote.txt", "/remote/newer_remote.txt", false, 42, baseUtc.AddMinutes(10))
+        };
+
+        var twoWay = FolderSyncPlanner.PlanSync(localSync, remoteEntries, "/remote", SyncDirection.TwoWayNewest);
+        Assert.Equal(1, twoWay.IdenticalCount);
+        Assert.Equal(2, twoWay.ToSendCount);
+        Assert.Equal(2, twoWay.ToPullCount);
+        Assert.Contains(twoWay.Items, x => x.RelativePath == "only_local.txt" && x.Action == SyncActionKind.CopyToRemote);
+        Assert.Contains(twoWay.Items, x => x.RelativePath == "newer_local.txt" && x.Action == SyncActionKind.CopyToRemote);
+        Assert.Contains(twoWay.Items, x => x.RelativePath == "only_remote.txt" && x.Action == SyncActionKind.CopyToLocal);
+        Assert.Contains(twoWay.Items, x => x.RelativePath == "newer_remote.txt" && x.Action == SyncActionKind.CopyToLocal);
+
+        var pushOnly = FolderSyncPlanner.PlanSync(localSync, remoteEntries, "/remote", SyncDirection.LocalToRemote);
+        Assert.Equal(3, pushOnly.ToSendCount);
+        Assert.Equal(0, pushOnly.ToPullCount);
+    }
+
+    [Fact]
+    public void TransferHistoryStore_PersistsAndCapsEntries()
+    {
+        string historyPath = Path.Combine(_rootTemp, "history.json");
+        var list = new List<TransferHistoryEntry>();
+        for (int i = 0; i < TransferHistoryStore.MaxEntries + 15; i++)
+        {
+            list.Add(new TransferHistoryEntry(
+                $"id-{i}",
+                DateTime.UtcNow.AddSeconds(i),
+                i % 2 == 0 ? TransferDirection.Pull : TransferDirection.Push,
+                $"file_{i}.bin",
+                $"C:\\dl\\file_{i}.bin",
+                $"remote/file_{i}.bin",
+                "PeerPC",
+                1024 + i,
+                5_000_000,
+                TransferStatus.Completed));
+        }
+
+        TransferHistoryStore.Save(historyPath, list);
+        var loaded = TransferHistoryStore.Load(historyPath);
+        Assert.Equal(TransferHistoryStore.MaxEntries, loaded.Count);
+        Assert.Equal($"id-{TransferHistoryStore.MaxEntries + 14}", loaded[0].Id);
     }
 
     public void Dispose()

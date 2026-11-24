@@ -136,6 +136,86 @@ public static class InputDialog
         return confirmed;
     }
 
+    public static async Task<bool> ShowCountdownConfirmAsync(Window owner, string title, string message, int seconds = 15, string executeLabel = "Run Now")
+    {
+        bool execute = false;
+        int remaining = Math.Max(1, seconds);
+
+        var dialog = new Window
+        {
+            Title = title,
+            Width = 440,
+            SizeToContent = SizeToContent.Height,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = SolidColorBrush.Parse("#0F172A"),
+            Foreground = SolidColorBrush.Parse("#F1F5F9")
+        };
+
+        var msgText = new TextBlock
+        {
+            Text = $"{message}\n\nExecuting automatically in {remaining} second(s)...",
+            FontSize = 13,
+            Foreground = SolidColorBrush.Parse("#E2E8F0"),
+            TextWrapping = TextWrapping.Wrap
+        };
+
+        var runBtn = new Button
+        {
+            Content = executeLabel,
+            Classes = { "danger" },
+            Padding = new Thickness(16, 6)
+        };
+        var cancelBtn = new Button
+        {
+            Content = "Cancel",
+            Classes = { "subtle" },
+            Padding = new Thickness(16, 6),
+            IsCancel = true
+        };
+
+        var timer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        timer.Tick += (_, _) =>
+        {
+            remaining--;
+            if (remaining <= 0)
+            {
+                timer.Stop();
+                execute = true;
+                dialog.Close();
+            }
+            else
+            {
+                msgText.Text = $"{message}\n\nExecuting automatically in {remaining} second(s)...";
+            }
+        };
+
+        runBtn.Click += (_, _) => { timer.Stop(); execute = true; dialog.Close(); };
+        cancelBtn.Click += (_, _) => { timer.Stop(); execute = false; dialog.Close(); };
+        dialog.Closed += (_, _) => timer.Stop();
+
+        dialog.Content = new StackPanel
+        {
+            Margin = new Thickness(18),
+            Spacing = 16,
+            Children =
+            {
+                msgText,
+                new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Spacing = 8,
+                    Children = { cancelBtn, runBtn }
+                }
+            }
+        };
+
+        timer.Start();
+        await dialog.ShowDialog(owner);
+        return execute;
+    }
+
     /// <summary>
     /// Generates a crisp 32x32 sky-blue rounded SwiftBeam icon in-memory for both Window and System Tray (Windows &amp; Linux).
     /// </summary>

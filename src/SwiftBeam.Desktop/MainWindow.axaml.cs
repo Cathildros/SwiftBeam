@@ -9,6 +9,8 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Settings;
+using SwiftBeam.Core.SystemIntegration;
+using SwiftBeam.Desktop.Controls;
 using SwiftBeam.Desktop.ViewModels;
 
 namespace SwiftBeam.Desktop;
@@ -59,6 +61,58 @@ public partial class MainWindow : Window
             remoteList.AddHandler(PointerPressedEvent, OnFileListPointerPressed, RoutingStrategies.Tunnel);
             remoteList.AddHandler(PointerMovedEvent, OnFileListPointerMoved, RoutingStrategies.Tunnel);
             remoteList.AddHandler(PointerReleasedEvent, OnFileListPointerReleased, RoutingStrategies.Tunnel);
+        }
+
+        AddHandler(KeyDownEvent, OnWindowGlobalKeyDown, RoutingStrategies.Tunnel);
+    }
+
+    protected override void OnDataContextChanged(EventArgs e)
+    {
+        base.OnDataContextChanged(e);
+        if (ViewModel is { } vm)
+        {
+            vm.SpeedSampleRecorded -= OnSpeedSampleRecorded;
+            vm.SpeedSampleRecorded += OnSpeedSampleRecorded;
+            vm.RequestPostTransferPowerAction = async action =>
+            {
+                await Dispatcher.UIThread.InvokeAsync(async () =>
+                {
+                    string verb = action == PostTransferAction.Sleep ? "put this computer to sleep" : "shut down this computer";
+                    string btn = action == PostTransferAction.Sleep ? "Sleep Now" : "Shut Down Now";
+                    bool go = await InputDialog.ShowCountdownConfirmAsync(
+                        this,
+                        "Transfer Queue Finished",
+                        $"All queued transfers are complete. SwiftBeam will {verb}.",
+                        seconds: 15,
+                        executeLabel: btn);
+                    if (go)
+                        SystemPowerHelper.ExecutePowerAction(action);
+                });
+            };
+        }
+    }
+
+    private void OnSpeedSampleRecorded(double bps)
+    {
+        this.FindControl<ThroughputSparkline>("SpeedSparkline")?.PushSample(bps);
+    }
+
+    private void OnWindowGlobalKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (ViewModel is null) return;
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Key == Key.H && ViewModel.IsTransferTabActive)
+        {
+            ViewModel.ToggleHiddenFilesCommand.Execute(null);
+            e.Handled = true;
+        }
+        else if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Key == Key.L && ViewModel.IsTransferTabActive)
+        {
+            var remoteList = this.FindControl<ListBox>("RemoteFileList");
+            if (remoteList is not null && remoteList.IsKeyboardFocusWithin && ViewModel.IsConnected)
+                BeginEditRemotePath();
+            else
+                BeginEditLocalPath();
+            e.Handled = true;
         }
     }
 
@@ -288,7 +342,7 @@ public partial class MainWindow : Window
     private void OnOpenHostSettingsFromMenuClick(object? sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
-        ViewModel.ActiveTabIndex = 1;
+        ViewModel.ActiveTabIndex = 2;
         GetHostMenuFlyout()?.Hide();
     }
 
@@ -592,6 +646,13 @@ public partial class MainWindow : Window
                 OnLocalDeleteClick(sender, e);
                 e.Handled = true;
                 break;
+            case Key.Space:
+                if (listBox.SelectedItem is RemoteEntryViewModel prevEntry && !prevEntry.IsDirectory)
+                {
+                    e.Handled = true;
+                    _ = PreviewLocalEntryAsync(prevEntry);
+                }
+                break;
         }
     }
 
@@ -638,6 +699,13 @@ public partial class MainWindow : Window
                 {
                     e.Handled = true;
                     OnRemoteDeleteClick(sender, e);
+                }
+                break;
+            case Key.Space:
+                if (listBox.SelectedItem is RemoteEntryViewModel prevEntry && !prevEntry.IsDirectory)
+                {
+                    e.Handled = true;
+                    _ = PreviewRemoteEntryAsync(prevEntry);
                 }
                 break;
         }
@@ -870,14 +938,262 @@ public partial class MainWindow : Window
 
     private void OnLocalPathKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter && ViewModel is not null)
+        if (ViewModel is null) return;
+        if (e.Key == Key.Enter)
+        {
+            ViewModel.IsEditingLocalPath = false;
             ViewModel.NavigateLocalInputCommand.Execute(null);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            ViewModel.IsEditingLocalPath = false;
+            e.Handled = true;
+        }
     }
 
     private void OnRemotePathKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter && ViewModel is not null)
+        if (ViewModel is null) return;
+        if (e.Key == Key.Enter)
+        {
+            ViewModel.IsEditingRemotePath = false;
             ViewModel.NavigateRemoteInputCommand.Execute(null);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            ViewModel.IsEditingRemotePath = false;
+            e.Handled = true;
+        }
+    }
+
+    private void BeginEditLocalPath()
+    {
+        if (ViewModel is null) return;
+        ViewModel.IsEditingLocalPath = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            var box = this.FindControl<TextBox>("LocalPathTextBox");
+            if (box is not null)
+            {
+                box.Focus();
+                box.SelectAll();
+            }
+        }, DispatcherPriority.Input);
+    }
+
+    private void BeginEditRemotePath()
+    {
+        if (ViewModel is null || !ViewModel.IsConnected) return;
+        ViewModel.IsEditingRemotePath = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            var box = this.FindControl<TextBox>("RemotePathTextBox");
+            if (box is not null)
+            {
+                box.Focus();
+                box.SelectAll();
+            }
+        }, DispatcherPriority.Input);
+    }
+
+    private void OnBeginEditLocalPathClick(object? sender, RoutedEventArgs e) => BeginEditLocalPath();
+    private void OnBeginEditRemotePathClick(object? sender, RoutedEventArgs e) => BeginEditRemotePath();
+
+    private void OnLocalPathLostFocus(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null) ViewModel.IsEditingLocalPath = false;
+    }
+
+    private void OnRemotePathLostFocus(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null) ViewModel.IsEditingRemotePath = false;
+    }
+
+    private void OnLocalBreadcrumbAreaPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (e.Source is Visual v && v.FindAncestorOfType<Button>() is not null)
+            return;
+        BeginEditLocalPath();
+    }
+
+    private void OnRemoteBreadcrumbAreaPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (e.Source is Visual v && v.FindAncestorOfType<Button>() is not null)
+            return;
+        BeginEditRemotePath();
+    }
+
+    private void OnLocalBreadcrumbClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null && sender is Button { DataContext: PathBreadcrumbSegment seg })
+            ViewModel.LoadLocalDirectory(seg.FullPath);
+    }
+
+    private async void OnRemoteBreadcrumbClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null && ViewModel.IsConnected && sender is Button { DataContext: PathBreadcrumbSegment seg })
+            await ViewModel.LoadRemoteDirectoryAsync(seg.FullPath);
+    }
+
+    private void OnPinnedLocalClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null && sender is Button { DataContext: PinnedFolderEntry entry })
+            ViewModel.LoadLocalDirectory(entry.Path);
+    }
+
+    private void OnUnpinLocalClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null && sender is Button { DataContext: PinnedFolderEntry entry })
+            ViewModel.UnpinLocalFolder(entry);
+    }
+
+    private async void OnPinnedRemoteClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null && ViewModel.IsConnected && sender is Button { DataContext: PinnedFolderEntry entry })
+            await ViewModel.LoadRemoteDirectoryAsync(entry.Path);
+    }
+
+    private void OnUnpinRemoteClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not null && sender is Button { DataContext: PinnedFolderEntry entry })
+            ViewModel.UnpinRemoteFolder(entry);
+    }
+
+    private async void OnLocalContextPreviewClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var list = this.FindControl<ListBox>("LocalFileList");
+        var entry = list?.SelectedItem as RemoteEntryViewModel ?? ViewModel.GetFirstSelectedLocalEntry();
+        if (entry is not null && !entry.IsDirectory)
+            await PreviewLocalEntryAsync(entry);
+        else
+            ViewModel.ShowToast("Select a local file to preview.");
+    }
+
+    private async void OnRemoteContextPreviewClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var list = this.FindControl<ListBox>("RemoteFileList");
+        var entry = list?.SelectedItem as RemoteEntryViewModel ?? ViewModel.GetFirstSelectedRemoteEntry();
+        if (entry is not null && !entry.IsDirectory)
+            await PreviewRemoteEntryAsync(entry);
+        else
+            ViewModel.ShowToast("Select a remote file to preview.");
+    }
+
+    private async Task PreviewLocalEntryAsync(RemoteEntryViewModel entry)
+    {
+        if (ViewModel is null) return;
+        try
+        {
+            if (!File.Exists(entry.RelativePath))
+                return;
+
+            var fi = new FileInfo(entry.RelativePath);
+            int maxBytes = PreviewDialog.IsImageFile(entry.Name) ? 8 * 1024 * 1024 : 262_144;
+            int toRead = (int)Math.Min(fi.Length, maxBytes);
+            byte[] buf = new byte[toRead];
+            if (toRead > 0)
+            {
+                await using var fs = new FileStream(entry.RelativePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                int read = 0;
+                while (read < toRead)
+                {
+                    int n = await fs.ReadAsync(buf.AsMemory(read, toRead - read));
+                    if (n == 0) break;
+                    read += n;
+                }
+                if (read < toRead)
+                    Array.Resize(ref buf, read);
+            }
+
+            await PreviewDialog.ShowPreviewAsync(
+                this,
+                entry.Name,
+                entry.RelativePath,
+                buf,
+                fi.Length,
+                fi.Length > toRead,
+                async text =>
+                {
+                    if (Clipboard is not null)
+                    {
+                        await Clipboard.SetTextAsync(text);
+                        ViewModel.ShowToast("Preview text copied to clipboard");
+                    }
+                });
+        }
+        catch (Exception ex)
+        {
+            ViewModel.SetConnectionError($"Preview failed: {ex.Message}");
+        }
+    }
+
+    private async Task PreviewRemoteEntryAsync(RemoteEntryViewModel entry)
+    {
+        if (ViewModel is null || !ViewModel.IsConnected) return;
+        try
+        {
+            var (data, totalSize, truncated) = await ViewModel.ReadRemotePreviewAsync(entry.Entry);
+            await PreviewDialog.ShowPreviewAsync(
+                this,
+                entry.Name,
+                entry.RelativePath,
+                data,
+                totalSize,
+                truncated,
+                async text =>
+                {
+                    if (Clipboard is not null)
+                    {
+                        await Clipboard.SetTextAsync(text);
+                        ViewModel.ShowToast("Preview text copied to clipboard");
+                    }
+                });
+        }
+        catch (Exception ex)
+        {
+            ViewModel.SetConnectionError($"Remote preview failed: {ex.Message}");
+        }
+    }
+
+    private async void OnOpenSyncDialogClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || !ViewModel.IsConnected) return;
+        await SyncFolderDialog.ShowSyncAsync(this, ViewModel);
+    }
+
+    private void OnOpenHistoryFolderClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: TransferHistoryItemViewModel item } && !string.IsNullOrWhiteSpace(item.Model.LocalPath))
+            OpenPathInOsShell(item.Model.LocalPath, revealInFolder: File.Exists(item.Model.LocalPath));
+    }
+
+    private async void OnCopyActivityLogClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || Clipboard is null) return;
+        string text = ViewModel.GetFullLogText();
+        await Clipboard.SetTextAsync(text);
+        ViewModel.ShowToast("Activity log copied to clipboard");
+    }
+
+    private async void OnExportActivityLogClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export SwiftBeam Activity Log",
+            SuggestedFileName = $"SwiftBeam-Log-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            DefaultExtension = "txt"
+        });
+        string? path = file?.TryGetLocalPath();
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            await File.WriteAllTextAsync(path, ViewModel.GetFullLogText());
+            ViewModel.ShowToast($"Exported activity log to {Path.GetFileName(path)}");
+        }
     }
 
     private async Task<string?> PickFolderAsync(string title)

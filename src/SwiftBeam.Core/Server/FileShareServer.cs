@@ -773,6 +773,32 @@ public sealed class FileShareServer : IAsyncDisposable
         return Path.GetRelativePath(rootFull, fullPath).Replace('\\', '/');
     }
 
+    public static bool IsHiddenEntry(string name, FileAttributes attributes) =>
+        (attributes & FileAttributes.Hidden) != 0 || (name.Length > 1 && name[0] == '.');
+
+    public static (long? FreeBytes, long? TotalBytes) TryGetDiskSpace(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || path == DrivesVirtualPath)
+                return (null, null);
+
+            string? root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrWhiteSpace(root))
+                return (null, null);
+
+            var drive = new DriveInfo(root);
+            if (!drive.IsReady)
+                return (null, null);
+
+            return (drive.AvailableFreeSpace, drive.TotalSize);
+        }
+        catch
+        {
+            return (null, null);
+        }
+    }
+
     private ListDirResponseMessage HandleListDir(ListDirRequestMessage req)
     {
         if (!TryResolveSafePath(req.RelativePath, out string targetDir, out string normalizedPath))
@@ -787,6 +813,7 @@ public sealed class FileShareServer : IAsyncDisposable
             return new ListDirResponseMessage(normalizedPath, [], $"Directory not found: {targetDir}");
 
         var entries = new List<RemoteEntry>();
+        var (freeDiskBytes, totalDiskBytes) = TryGetDiskSpace(targetDir);
 
         try
         {
@@ -803,7 +830,9 @@ public sealed class FileShareServer : IAsyncDisposable
                     {
                         if ((d.Attributes & FileAttributes.ReparsePoint) != 0) continue;
                         if ((d.Attributes & FileAttributes.System) != 0 && (d.Attributes & FileAttributes.Hidden) != 0) continue;
-                        entries.Add(new RemoteEntry(d.Name, FormatWirePath(d.FullName), true, 0, d.LastWriteTimeUtc));
+                        bool isHidden = IsHiddenEntry(d.Name, d.Attributes);
+                        if (isHidden && !req.IncludeHidden) continue;
+                        entries.Add(new RemoteEntry(d.Name, FormatWirePath(d.FullName), true, 0, d.LastWriteTimeUtc, isHidden));
                     }
                     catch { }
                 }
@@ -818,7 +847,9 @@ public sealed class FileShareServer : IAsyncDisposable
                     {
                         if ((f.Attributes & FileAttributes.ReparsePoint) != 0) continue;
                         if ((f.Attributes & FileAttributes.System) != 0 && (f.Attributes & FileAttributes.Hidden) != 0) continue;
-                        entries.Add(new RemoteEntry(f.Name, FormatWirePath(f.FullName), false, f.Length, f.LastWriteTimeUtc));
+                        bool isHidden = IsHiddenEntry(f.Name, f.Attributes);
+                        if (isHidden && !req.IncludeHidden) continue;
+                        entries.Add(new RemoteEntry(f.Name, FormatWirePath(f.FullName), false, f.Length, f.LastWriteTimeUtc, isHidden));
                     }
                     catch { }
                 }
@@ -839,14 +870,17 @@ public sealed class FileShareServer : IAsyncDisposable
                         try
                         {
                             if ((item.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                            if ((item.Attributes & FileAttributes.System) != 0 && (item.Attributes & FileAttributes.Hidden) != 0) continue;
+                            bool isHidden = IsHiddenEntry(item.Name, item.Attributes);
+                            if (isHidden && !req.IncludeHidden) continue;
                             if (item is DirectoryInfo subDir)
                             {
-                                entries.Add(new RemoteEntry(subDir.Name, FormatWirePath(subDir.FullName), true, 0, subDir.LastWriteTimeUtc));
+                                entries.Add(new RemoteEntry(subDir.Name, FormatWirePath(subDir.FullName), true, 0, subDir.LastWriteTimeUtc, isHidden));
                                 stack.Push(subDir);
                             }
                             else if (item is FileInfo fi)
                             {
-                                entries.Add(new RemoteEntry(fi.Name, FormatWirePath(fi.FullName), false, fi.Length, fi.LastWriteTimeUtc));
+                                entries.Add(new RemoteEntry(fi.Name, FormatWirePath(fi.FullName), false, fi.Length, fi.LastWriteTimeUtc, isHidden));
                             }
                         }
                         catch { }
@@ -854,11 +888,11 @@ public sealed class FileShareServer : IAsyncDisposable
                 }
             }
 
-            return new ListDirResponseMessage(normalizedPath, entries);
+            return new ListDirResponseMessage(normalizedPath, entries, null, freeDiskBytes, totalDiskBytes);
         }
         catch (Exception ex)
         {
-            return new ListDirResponseMessage(normalizedPath, [], ex.Message);
+            return new ListDirResponseMessage(normalizedPath, [], ex.Message, freeDiskBytes, totalDiskBytes);
         }
     }
 

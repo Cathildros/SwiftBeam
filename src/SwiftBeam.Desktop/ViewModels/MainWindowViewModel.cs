@@ -33,6 +33,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private readonly TransferManager _transferManager = new();
     private readonly SleepInhibitor _sleepInhibitor = new();
     private readonly Dictionary<string, TransferItemViewModel> _transferMap = new();
+    private readonly List<TransferHistoryItemViewModel> _allHistoryItems = [];
+    private readonly HashSet<string> _recordedHistoryIds = [];
 
     private readonly List<RemoteEntryViewModel> _allLocalEntries = [];
     private readonly List<RemoteEntryViewModel> _allRemoteEntries = [];
@@ -44,7 +46,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private static readonly IBrush NavActiveFg = Brushes.White;
     private static readonly IBrush NavInactiveFg = SolidColorBrush.Parse("#94A3B8");
 
-    private int _activeTabIndex; // 0 = File Transfer, 1 = Host & Settings, 2 = Activity Log
+    private int _activeTabIndex; // 0 = File Transfer, 1 = History, 2 = Host & Settings, 3 = Activity Log
     private bool _isTransferPanelExpanded = true;
     private bool _isServerRunning;
     private bool _isInstallerServerRunning;
@@ -76,8 +78,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     // Local browser (Left Pane)
     private string _localPath = string.Empty;
     private string _localPathInput = string.Empty;
+    private bool _isEditingLocalPath;
     private string _localSearchFilter = string.Empty;
     private string _localSelectionText = "0 items";
+    private string _localFreeSpaceText = string.Empty;
+    private long? _localFreeDiskBytes;
     private string _localEmptyMessage = string.Empty;
     private string _localSortColumn = "Name";
     private bool _localSortAsc = true;
@@ -85,11 +90,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     // Remote browser (Right Pane)
     private string _remotePath = string.Empty;
     private string _remotePathInput = string.Empty;
+    private bool _isEditingRemotePath;
     private string _remoteSearchFilter = string.Empty;
     private string _remoteSelectionText = "Not connected";
+    private string _remoteFreeSpaceText = string.Empty;
+    private long? _remoteFreeDiskBytes;
     private string _remoteEmptyMessage = string.Empty;
     private string _remoteSortColumn = "Name";
     private bool _remoteSortAsc = true;
+
+    // Queue & History extras
+    private bool _hasFailedTransfers;
+    private int _postTransferActionIndex;
+    private string _historySearchFilter = string.Empty;
 
     // Telemetry & Completion Toast
     private double _overallProgressPercent;
@@ -128,7 +141,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ObservableCollection<PeerEndpoint> SelectedPeerEndpoints { get; } = [];
     public ObservableCollection<RemoteEntryViewModel> FilteredLocalEntries { get; } = [];
     public ObservableCollection<RemoteEntryViewModel> FilteredRemoteEntries { get; } = [];
+    public ObservableCollection<PathBreadcrumbSegment> LocalBreadcrumbs { get; } = [];
+    public ObservableCollection<PathBreadcrumbSegment> RemoteBreadcrumbs { get; } = [];
+    public ObservableCollection<PinnedFolderEntry> PinnedLocalFolders { get; } = [];
+    public ObservableCollection<PinnedFolderEntry> PinnedRemoteFolders { get; } = [];
     public ObservableCollection<TransferItemViewModel> Transfers { get; } = [];
+    public ObservableCollection<TransferHistoryItemViewModel> FilteredHistory { get; } = [];
     public ObservableCollection<string> LogEntries { get; } = [];
 
     // --- Header Navigation & Collapsible Transfer Drawer ---
@@ -140,12 +158,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             if (SetProperty(ref _activeTabIndex, value))
             {
                 OnPropertyChanged(nameof(IsTransferTabActive));
+                OnPropertyChanged(nameof(IsHistoryTabActive));
                 OnPropertyChanged(nameof(IsSettingsTabActive));
                 OnPropertyChanged(nameof(IsLogTabActive));
                 OnPropertyChanged(nameof(TransferTabBg));
+                OnPropertyChanged(nameof(HistoryTabBg));
                 OnPropertyChanged(nameof(SettingsTabBg));
                 OnPropertyChanged(nameof(LogTabBg));
                 OnPropertyChanged(nameof(TransferTabFg));
+                OnPropertyChanged(nameof(HistoryTabFg));
                 OnPropertyChanged(nameof(SettingsTabFg));
                 OnPropertyChanged(nameof(LogTabFg));
             }
@@ -153,12 +174,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsTransferTabActive => _activeTabIndex == 0;
-    public bool IsSettingsTabActive => _activeTabIndex == 1;
-    public bool IsLogTabActive => _activeTabIndex == 2;
+    public bool IsHistoryTabActive => _activeTabIndex == 1;
+    public bool IsSettingsTabActive => _activeTabIndex == 2;
+    public bool IsLogTabActive => _activeTabIndex == 3;
     public IBrush TransferTabBg => IsTransferTabActive ? NavActiveBg : NavInactiveBg;
+    public IBrush HistoryTabBg => IsHistoryTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush SettingsTabBg => IsSettingsTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush LogTabBg => IsLogTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush TransferTabFg => IsTransferTabActive ? NavActiveFg : NavInactiveFg;
+    public IBrush HistoryTabFg => IsHistoryTabActive ? NavActiveFg : NavInactiveFg;
     public IBrush SettingsTabFg => IsSettingsTabActive ? NavActiveFg : NavInactiveFg;
     public IBrush LogTabFg => IsLogTabActive ? NavActiveFg : NavInactiveFg;
 
@@ -380,6 +404,27 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsLinuxPlatform => OperatingSystem.IsLinux();
+
+    public bool ShowHiddenFiles
+    {
+        get => _settings.ShowHiddenFiles;
+        set
+        {
+            if (_settings.ShowHiddenFiles != value)
+            {
+                _settings.ShowHiddenFiles = value;
+                _settings.Save();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HiddenFilesToggleText));
+                if (!string.IsNullOrEmpty(LocalPath))
+                    LoadLocalDirectory(LocalPath);
+                if (IsConnected)
+                    _ = LoadRemoteDirectoryAsync(RemotePath);
+            }
+        }
+    }
+
+    public string HiddenFilesToggleText => ShowHiddenFiles ? "Hidden ✓" : "Hidden";
 
     public bool IsServerRunning
     {
@@ -698,6 +743,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public Action? RequestAppShutdown { get; set; }
     public Func<string, string, bool, Task<bool>>? HostApprovalPromptHandler { get; set; }
     public Func<string, Task>? RequestClipboardCopy { get; set; }
+    public Func<PostTransferAction, Task>? RequestPostTransferPowerAction { get; set; }
+    public event Action<double>? SpeedSampleRecorded;
     public string AppVersionText { get; } = $"v{GitHubUpdateService.GetCurrentVersion()}";
 
     public string UpdateRepo
@@ -963,8 +1010,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             if (SetProperty(ref _localPath, value))
             {
                 LocalPathInput = value == FileShareServer.DrivesVirtualPath ? "This PC / Drives" : value;
+                RebuildBreadcrumbs(LocalBreadcrumbs, value, isLocal: true);
                 OnPropertyChanged(nameof(CanGoUpLocal));
+                OnPropertyChanged(nameof(IsCurrentLocalPinned));
+                OnPropertyChanged(nameof(LocalPinIcon));
                 GoUpLocalCommand.RaiseCanExecuteChanged();
+                TogglePinLocalCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -975,7 +1026,28 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         set => SetProperty(ref _localPathInput, value);
     }
 
+    public bool IsEditingLocalPath
+    {
+        get => _isEditingLocalPath;
+        set => SetProperty(ref _isEditingLocalPath, value);
+    }
+
     public bool CanGoUpLocal => !string.IsNullOrEmpty(LocalPath) && LocalPath != FileShareServer.DrivesVirtualPath;
+    public bool IsCurrentLocalPinned => !string.IsNullOrEmpty(LocalPath) && LocalPath != FileShareServer.DrivesVirtualPath &&
+        PinnedLocalFolders.Any(p => p.Path.Equals(LocalPath, StringComparison.OrdinalIgnoreCase));
+    public string LocalPinIcon => IsCurrentLocalPinned ? "★" : "☆";
+
+    public string LocalFreeSpaceText
+    {
+        get => _localFreeSpaceText;
+        private set
+        {
+            if (SetProperty(ref _localFreeSpaceText, value))
+                OnPropertyChanged(nameof(HasLocalFreeSpace));
+        }
+    }
+
+    public bool HasLocalFreeSpace => !string.IsNullOrEmpty(LocalFreeSpaceText);
 
     public string LocalSearchFilter
     {
@@ -1016,8 +1088,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 RemotePathInput = value == FileShareServer.DrivesVirtualPath
                     ? "Drives / Roots"
                     : (string.IsNullOrEmpty(value) ? "/" : value);
+                RebuildBreadcrumbs(RemoteBreadcrumbs, value, isLocal: false);
                 OnPropertyChanged(nameof(CanGoUpRemote));
+                OnPropertyChanged(nameof(IsCurrentRemotePinned));
+                OnPropertyChanged(nameof(RemotePinIcon));
                 GoUpRemoteCommand.RaiseCanExecuteChanged();
+                TogglePinRemoteCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -1028,7 +1104,28 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         set => SetProperty(ref _remotePathInput, value);
     }
 
+    public bool IsEditingRemotePath
+    {
+        get => _isEditingRemotePath;
+        set => SetProperty(ref _isEditingRemotePath, value);
+    }
+
     public bool CanGoUpRemote => IsConnected && !string.IsNullOrEmpty(RemotePath) && RemotePath != FileShareServer.DrivesVirtualPath;
+    public bool IsCurrentRemotePinned => IsConnected && !string.IsNullOrEmpty(RemotePath) && RemotePath != FileShareServer.DrivesVirtualPath &&
+        PinnedRemoteFolders.Any(p => p.Path.Equals(RemotePath, StringComparison.OrdinalIgnoreCase));
+    public string RemotePinIcon => IsCurrentRemotePinned ? "★" : "☆";
+
+    public string RemoteFreeSpaceText
+    {
+        get => _remoteFreeSpaceText;
+        private set
+        {
+            if (SetProperty(ref _remoteFreeSpaceText, value))
+                OnPropertyChanged(nameof(HasRemoteFreeSpace));
+        }
+    }
+
+    public bool HasRemoteFreeSpace => IsConnected && !string.IsNullOrEmpty(RemoteFreeSpaceText);
 
     public string RemoteSearchFilter
     {
@@ -1057,6 +1154,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool HasRemoteEmptyMessage => IsConnected && !string.IsNullOrEmpty(RemoteEmptyMessage);
+
+    public bool HasFailedTransfers
+    {
+        get => _hasFailedTransfers;
+        private set => SetProperty(ref _hasFailedTransfers, value);
+    }
+
+    public int PostTransferActionIndex
+    {
+        get => _postTransferActionIndex;
+        set => SetProperty(ref _postTransferActionIndex, Math.Clamp(value, 0, 3));
+    }
+
+    public string HistorySearchFilter
+    {
+        get => _historySearchFilter;
+        set
+        {
+            if (SetProperty(ref _historySearchFilter, value))
+                ApplyHistoryFilter();
+        }
+    }
+
+    public bool HasNoHistoryEntries => FilteredHistory.Count == 0;
 
     // --- Transfer Queue & Telemetry ---
     public int ParallelWorkers
@@ -1141,8 +1262,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     // --- Commands ---
     public RelayCommand ShowTransferTabCommand { get; }
+    public RelayCommand ShowHistoryTabCommand { get; }
     public RelayCommand ShowSettingsTabCommand { get; }
     public RelayCommand ShowLogTabCommand { get; }
+    public RelayCommand ToggleHiddenFilesCommand { get; }
+    public RelayCommand TogglePinLocalCommand { get; }
+    public AsyncRelayCommand TogglePinRemoteCommand { get; }
+    public RelayCommand RetryFailedCommand { get; }
+    public RelayCommand ClearHistoryCommand { get; }
+    public RelayCommand ClearLogCommand { get; }
     public AsyncRelayCommand ToggleServerCommand { get; }
     public AsyncRelayCommand DisconnectIncomingPeersCommand { get; }
     public AsyncRelayCommand ToggleInstallerServerCommand { get; }
@@ -1262,13 +1390,37 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _transferManager.ItemAdded += OnTransferItemAdded;
         _transferManager.ItemUpdated += OnTransferItemUpdated;
         _transferManager.ItemRemoved += OnTransferItemRemoved;
+        _transferManager.QueueReordered += OnTransferQueueReordered;
         _transferManager.TelemetryUpdated += OnTelemetryUpdated;
 
         ReloadSavedPeersCollection();
+        ReloadPinnedLocalFolders();
+        LoadHistoryEntries();
 
         ShowTransferTabCommand = new RelayCommand(() => ActiveTabIndex = 0);
-        ShowSettingsTabCommand = new RelayCommand(() => ActiveTabIndex = 1);
-        ShowLogTabCommand = new RelayCommand(() => ActiveTabIndex = 2);
+        ShowHistoryTabCommand = new RelayCommand(() => ActiveTabIndex = 1);
+        ShowSettingsTabCommand = new RelayCommand(() => ActiveTabIndex = 2);
+        ShowLogTabCommand = new RelayCommand(() => ActiveTabIndex = 3);
+        ToggleHiddenFilesCommand = new RelayCommand(() => ShowHiddenFiles = !ShowHiddenFiles);
+        TogglePinLocalCommand = new RelayCommand(TogglePinLocal, () => CanGoUpLocal);
+        TogglePinRemoteCommand = new AsyncRelayCommand(() => { TogglePinRemote(); return Task.CompletedTask; }, () => IsConnected && RemotePath != FileShareServer.DrivesVirtualPath);
+        RetryFailedCommand = new RelayCommand(() =>
+        {
+            int retried = _transferManager.RetryAllFailed();
+            if (retried > 0)
+            {
+                RefreshFailedFlag();
+                ShowToast($"Retrying {retried} failed transfer(s)");
+            }
+        });
+        ClearHistoryCommand = new RelayCommand(() =>
+        {
+            _allHistoryItems.Clear();
+            TransferHistoryStore.Save(AppSettings.GetHistoryFilePath(), []);
+            ApplyHistoryFilter();
+            ShowToast("Transfer history cleared");
+        });
+        ClearLogCommand = new RelayCommand(() => LogEntries.Clear());
         ToggleServerCommand = new AsyncRelayCommand(ToggleServerAsync);
         DisconnectIncomingPeersCommand = new AsyncRelayCommand(() => _server.DisconnectIncomingClientsAsync());
         ToggleInstallerServerCommand = new AsyncRelayCommand(ToggleInstallerServerAsync);
@@ -1410,10 +1562,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         string raw = (targetPath ?? string.Empty).Trim();
         _allLocalEntries.Clear();
         LocalEmptyMessage = string.Empty;
+        IsEditingLocalPath = false;
 
         if (string.IsNullOrEmpty(raw) || raw.Equals(FileShareServer.DrivesVirtualPath, StringComparison.OrdinalIgnoreCase) || raw.Equals("This PC / Drives", StringComparison.OrdinalIgnoreCase))
         {
             LocalPath = FileShareServer.DrivesVirtualPath;
+            _localFreeDiskBytes = null;
+            LocalFreeSpaceText = string.Empty;
             foreach (var root in FileShareServer.EnumerateRoots())
                 AddLocalEntry(root);
             ApplyLocalFilter();
@@ -1436,7 +1591,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
 
             LocalPath = full;
+            var (freeBytes, _) = FileShareServer.TryGetDiskSpace(full);
+            _localFreeDiskBytes = freeBytes;
+            LocalFreeSpaceText = freeBytes is long fb ? $"{TransferManager.FormatBytes(fb)} free" : string.Empty;
+
             var di = new DirectoryInfo(full);
+            bool includeHidden = ShowHiddenFiles;
 
             foreach (var d in SafeEnumerate(() => di.EnumerateDirectories().OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)))
             {
@@ -1444,7 +1604,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 {
                     if ((d.Attributes & FileAttributes.ReparsePoint) != 0) continue;
                     if ((d.Attributes & FileAttributes.System) != 0 && (d.Attributes & FileAttributes.Hidden) != 0) continue;
-                    AddLocalEntry(new RemoteEntry(d.Name, d.FullName, true, 0, d.LastWriteTimeUtc));
+                    bool isHidden = FileShareServer.IsHiddenEntry(d.Name, d.Attributes);
+                    if (isHidden && !includeHidden) continue;
+                    AddLocalEntry(new RemoteEntry(d.Name, d.FullName, true, 0, d.LastWriteTimeUtc, isHidden));
                 }
                 catch { }
             }
@@ -1455,7 +1617,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 {
                     if ((f.Attributes & FileAttributes.ReparsePoint) != 0) continue;
                     if ((f.Attributes & FileAttributes.System) != 0 && (f.Attributes & FileAttributes.Hidden) != 0) continue;
-                    AddLocalEntry(new RemoteEntry(f.Name, f.FullName, false, f.Length, f.LastWriteTimeUtc));
+                    bool isHidden = FileShareServer.IsHiddenEntry(f.Name, f.Attributes);
+                    if (isHidden && !includeHidden) continue;
+                    AddLocalEntry(new RemoteEntry(f.Name, f.FullName, false, f.Length, f.LastWriteTimeUtc, isHidden));
                 }
                 catch { }
             }
@@ -1880,6 +2044,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             // Remember this computer (and PIN if RememberPin is checked) for 1-click reconnect next time
             _settings.UpsertSavedPeer(meta.DeviceName, host, port, ConnectUseTls, RememberPin ? ConnectPin.Trim() : string.Empty);
             ReloadSavedPeersCollection();
+            ReloadPinnedRemoteFolders();
 
             AppendLog($"Connected to {meta.DeviceName} ({meta.OsPlatform}) at {host}:{port} ({encBadge})");
 
@@ -1920,7 +2085,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _connectedPeer = null;
         _connectedEndpointSummary = string.Empty;
         IsConnected = false;
+        IsEditingRemotePath = false;
         RemotePath = string.Empty;
+        _remoteFreeDiskBytes = null;
+        RemoteFreeSpaceText = string.Empty;
+        PinnedRemoteFolders.Clear();
+        RemoteBreadcrumbs.Clear();
         RemoteEmptyMessage = string.Empty;
         _allRemoteEntries.Clear();
         FilteredRemoteEntries.Clear();
@@ -1977,11 +2147,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task LoadRemoteDirectoryAsync(string relativePath)
+    public async Task LoadRemoteDirectoryAsync(string relativePath)
     {
         if (!IsConnected) return;
         try
         {
+            IsEditingRemotePath = false;
             string target = (relativePath ?? string.Empty).Trim();
             if (target.Equals("Drives / Roots", StringComparison.OrdinalIgnoreCase))
                 target = FileShareServer.DrivesVirtualPath;
@@ -1989,13 +2160,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ListDirResponseMessage resp;
             try
             {
-                resp = await _browseClient.ListDirectoryAsync(target, recursive: false);
+                resp = await _browseClient.ListDirectoryAsync(target, recursive: false, includeHidden: ShowHiddenFiles);
             }
             catch (Exception ex) when (ex is IOException or EndOfStreamException or SocketException && _lastConnectionTarget is not null)
             {
                 // Transparently reconnect browse socket if Wi-Fi/cable briefly dropped while idle
                 await _browseClient.ConnectAsync(_lastConnectionTarget);
-                resp = await _browseClient.ListDirectoryAsync(target, recursive: false);
+                resp = await _browseClient.ListDirectoryAsync(target, recursive: false, includeHidden: ShowHiddenFiles);
             }
             if (!string.IsNullOrEmpty(resp.Error))
             {
@@ -2005,6 +2176,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
 
             ConnectionError = string.Empty;
+            _remoteFreeDiskBytes = resp.FreeDiskBytes;
+            RemoteFreeSpaceText = resp.FreeDiskBytes is long fb ? $"{TransferManager.FormatBytes(fb)} free" : string.Empty;
             RemotePath = resp.CurrentPath;
             _allRemoteEntries.Clear();
             foreach (var entry in resp.Entries)
@@ -2213,9 +2386,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             var added = await _transferManager.EnqueuePushPathsAsync(_browseClient, pathList, RemotePath);
             if (added.Count > 0)
             {
+                long totalBytes = added.Sum(x => x.TotalBytes);
+                bool lowSpace = _remoteFreeDiskBytes is long free && totalBytes > free;
                 string verb = isDrop ? "Dropped" : "Queued";
                 AppendLog($"{verb} {added.Count} file(s) → sending to {RemotePathInput} ({ParallelWorkers} parallel streams).");
-                ShowToast($"Queued {added.Count} file(s) to send");
+                ShowToast(lowSpace
+                    ? $"⚠️ Warning: Remote drive has {TransferManager.FormatBytes(_remoteFreeDiskBytes!.Value)} free for {TransferManager.FormatBytes(totalBytes)}"
+                    : $"Queued {added.Count} file(s) to send");
                 SavePendingQueueSafe();
             }
         }
@@ -2240,11 +2417,16 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             Directory.CreateDirectory(destFolder);
             string baseRemote = RemotePath == FileShareServer.DrivesVirtualPath ? string.Empty : RemotePath;
-            var added = await _transferManager.EnqueueEntriesAsync(_browseClient, entries, destFolder, baseRemote);
+            var added = await _transferManager.EnqueueEntriesAsync(_browseClient, entries, destFolder, baseRemote, includeHidden: ShowHiddenFiles);
             if (added.Count > 0)
             {
+                long totalBytes = added.Sum(x => x.TotalBytes);
+                var (destFree, _) = FileShareServer.TryGetDiskSpace(destFolder);
+                bool lowSpace = destFree is long free && totalBytes > free;
                 AppendLog($"Pulling {added.Count} file(s) into {destFolder} ({ParallelWorkers} parallel streams).");
-                ShowToast($"Queued {added.Count} file(s) to pull");
+                ShowToast(lowSpace
+                    ? $"⚠️ Warning: Local drive has {TransferManager.FormatBytes(destFree!.Value)} free for {TransferManager.FormatBytes(totalBytes)}"
+                    : $"Queued {added.Count} file(s) to pull");
                 SavePendingQueueSafe();
             }
         }
@@ -2372,6 +2554,273 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    // --- Breadcrumbs, Pinned Folders, Preview, Sync & History ---
+    private static void RebuildBreadcrumbs(ObservableCollection<PathBreadcrumbSegment> target, string rawPath, bool isLocal)
+    {
+        target.Clear();
+        if (string.IsNullOrEmpty(rawPath) || rawPath == FileShareServer.DrivesVirtualPath)
+        {
+            target.Add(new PathBreadcrumbSegment(isLocal ? "This PC" : "Roots", FileShareServer.DrivesVirtualPath, true));
+            return;
+        }
+
+        string norm = rawPath.Replace('\\', '/');
+        if (norm == "/")
+        {
+            target.Add(new PathBreadcrumbSegment("Roots", FileShareServer.DrivesVirtualPath, false));
+            target.Add(new PathBreadcrumbSegment("/", "/", true));
+            return;
+        }
+
+        target.Add(new PathBreadcrumbSegment(isLocal ? "Drives" : "Roots", FileShareServer.DrivesVirtualPath, false));
+
+        bool unixAbs = norm.StartsWith('/');
+        string trimmed = norm.Trim('/');
+        if (string.IsNullOrEmpty(trimmed))
+            return;
+
+        string[] parts = trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < parts.Length; i++)
+        {
+            string segPath;
+            if (unixAbs)
+            {
+                segPath = "/" + string.Join('/', parts.Take(i + 1));
+            }
+            else if (i == 0 && parts[0].Length == 2 && parts[0][1] == ':')
+            {
+                segPath = parts[0] + "/";
+            }
+            else
+            {
+                segPath = string.Join('/', parts.Take(i + 1));
+            }
+
+            if (isLocal && segPath != FileShareServer.DrivesVirtualPath)
+                segPath = segPath.Replace('/', Path.DirectorySeparatorChar);
+
+            target.Add(new PathBreadcrumbSegment(parts[i], segPath, i == parts.Length - 1));
+        }
+    }
+
+    private void ReloadPinnedLocalFolders()
+    {
+        PinnedLocalFolders.Clear();
+        foreach (var entry in _settings.PinnedLocalFolders)
+            PinnedLocalFolders.Add(entry);
+        OnPropertyChanged(nameof(IsCurrentLocalPinned));
+        OnPropertyChanged(nameof(LocalPinIcon));
+    }
+
+    private void ReloadPinnedRemoteFolders()
+    {
+        PinnedRemoteFolders.Clear();
+        string peerKey = _connectedPeer?.DeviceName ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(peerKey) && _settings.PinnedRemoteFoldersByPeer.TryGetValue(peerKey, out var list))
+        {
+            foreach (var entry in list)
+                PinnedRemoteFolders.Add(entry);
+        }
+        OnPropertyChanged(nameof(IsCurrentRemotePinned));
+        OnPropertyChanged(nameof(RemotePinIcon));
+    }
+
+    public void TogglePinLocal()
+    {
+        if (string.IsNullOrWhiteSpace(LocalPath) || LocalPath == FileShareServer.DrivesVirtualPath) return;
+
+        int existing = _settings.PinnedLocalFolders.FindIndex(p => p.Path.Equals(LocalPath, StringComparison.OrdinalIgnoreCase));
+        if (existing >= 0)
+        {
+            _settings.PinnedLocalFolders.RemoveAt(existing);
+            ShowToast("Removed folder pin");
+        }
+        else
+        {
+            string label = Path.GetFileName(LocalPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrWhiteSpace(label)) label = LocalPath;
+            _settings.PinnedLocalFolders.Add(new PinnedFolderEntry { Name = label, Path = LocalPath });
+            ShowToast($"Pinned '{label}'");
+        }
+
+        _settings.Save();
+        ReloadPinnedLocalFolders();
+    }
+
+    public void UnpinLocalFolder(PinnedFolderEntry entry)
+    {
+        _settings.PinnedLocalFolders.RemoveAll(p => p.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase));
+        _settings.Save();
+        ReloadPinnedLocalFolders();
+    }
+
+    public void TogglePinRemote()
+    {
+        if (!IsConnected || _connectedPeer is null || string.IsNullOrWhiteSpace(RemotePath) || RemotePath == FileShareServer.DrivesVirtualPath)
+            return;
+
+        string peerKey = _connectedPeer.DeviceName;
+        if (!_settings.PinnedRemoteFoldersByPeer.TryGetValue(peerKey, out var list))
+        {
+            list = [];
+            _settings.PinnedRemoteFoldersByPeer[peerKey] = list;
+        }
+
+        int existing = list.FindIndex(p => p.Path.Equals(RemotePath, StringComparison.OrdinalIgnoreCase));
+        if (existing >= 0)
+        {
+            list.RemoveAt(existing);
+            ShowToast("Removed remote folder pin");
+        }
+        else
+        {
+            string clean = RemotePath.TrimEnd('/');
+            int slash = clean.LastIndexOf('/');
+            string label = slash >= 0 ? clean[(slash + 1)..] : clean;
+            if (string.IsNullOrWhiteSpace(label)) label = RemotePath;
+            list.Add(new PinnedFolderEntry { Name = label, Path = RemotePath });
+            ShowToast($"Pinned remote '{label}'");
+        }
+
+        _settings.Save();
+        ReloadPinnedRemoteFolders();
+    }
+
+    public void UnpinRemoteFolder(PinnedFolderEntry entry)
+    {
+        string peerKey = _connectedPeer?.DeviceName ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(peerKey) && _settings.PinnedRemoteFoldersByPeer.TryGetValue(peerKey, out var list))
+        {
+            list.RemoveAll(p => p.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase));
+            _settings.Save();
+            ReloadPinnedRemoteFolders();
+        }
+    }
+
+    public async Task<(byte[] Data, long TotalFileSize, bool Truncated)> ReadRemotePreviewAsync(RemoteEntry entry, int maxBytes = 262_144)
+    {
+        if (!IsConnected)
+            throw new InvalidOperationException("Not connected.");
+        int limit = PreviewDialog.IsImageFile(entry.Name) ? 8 * 1024 * 1024 : maxBytes;
+        return await _browseClient.ReadFilePreviewAsync(entry.RelativePath, limit);
+    }
+
+    public async Task<SyncPlanResult> PlanFolderSyncAsync(SyncDirection direction)
+    {
+        if (!IsConnected)
+            throw new InvalidOperationException("Connect to a remote computer first.");
+        if (string.IsNullOrEmpty(LocalPath) || LocalPath == FileShareServer.DrivesVirtualPath || !Directory.Exists(LocalPath))
+            throw new InvalidOperationException("Open a local folder first before syncing.");
+        if (RemotePath == FileShareServer.DrivesVirtualPath)
+            throw new InvalidOperationException("Open a remote folder first before syncing.");
+
+        var listing = await _browseClient.ListDirectoryAsync(RemotePath, recursive: true, includeHidden: ShowHiddenFiles);
+        if (!string.IsNullOrEmpty(listing.Error))
+            throw new InvalidOperationException(listing.Error);
+
+        return FolderSyncPlanner.PlanSync(LocalPath, listing.Entries, RemotePath, direction, includeHidden: ShowHiddenFiles);
+    }
+
+    public async Task ExecuteSyncDiffAsync(IReadOnlyList<SyncDiffItem> items)
+    {
+        if (!IsConnected || items.Count == 0)
+            return;
+
+        int queued = 0;
+        var createdRemoteDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var diff in items)
+        {
+            if (diff.Action == SyncActionKind.CopyToRemote)
+            {
+                if (IsRemoteReadOnly) continue;
+                int slash = diff.RemoteFullPath.Replace('\\', '/').LastIndexOf('/');
+                if (slash > 0)
+                {
+                    string parentDir = diff.RemoteFullPath.Replace('\\', '/')[..slash];
+                    if (createdRemoteDirs.Add(parentDir))
+                    {
+                        try { await _browseClient.CreateDirectoryAsync(parentDir); } catch { }
+                    }
+                }
+                _transferManager.EnqueuePushFile(diff.LocalFullPath, diff.RemoteFullPath);
+                queued++;
+            }
+            else if (diff.Action == SyncActionKind.CopyToLocal && diff.RemoteEntry is not null)
+            {
+                string? localDir = Path.GetDirectoryName(diff.LocalFullPath);
+                if (!string.IsNullOrEmpty(localDir))
+                    Directory.CreateDirectory(localDir);
+                _transferManager.EnqueueFile(diff.RemoteEntry, diff.LocalFullPath);
+                queued++;
+            }
+        }
+
+        if (queued > 0)
+        {
+            SavePendingQueueSafe();
+            AppendLog($"Folder sync queued {queued} transfer(s).");
+            ShowToast($"Folder sync queued {queued} file(s)");
+        }
+    }
+
+    private void LoadHistoryEntries()
+    {
+        _allHistoryItems.Clear();
+        foreach (var entry in TransferHistoryStore.Load(AppSettings.GetHistoryFilePath()))
+            _allHistoryItems.Add(new TransferHistoryItemViewModel(entry));
+        ApplyHistoryFilter();
+    }
+
+    private void ApplyHistoryFilter()
+    {
+        string filter = HistorySearchFilter.Trim();
+        FilteredHistory.Clear();
+        foreach (var item in _allHistoryItems)
+        {
+            if (string.IsNullOrEmpty(filter) ||
+                item.FileName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                item.PeerName.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            {
+                FilteredHistory.Add(item);
+            }
+        }
+        OnPropertyChanged(nameof(HasNoHistoryEntries));
+    }
+
+    private void RecordHistoryItem(TransferItem item)
+    {
+        if (item.Status is not (TransferStatus.Completed or TransferStatus.Failed))
+            return;
+        if (!_recordedHistoryIds.Add(item.Id))
+            return;
+
+        var entry = new TransferHistoryEntry(
+            item.Id,
+            item.CompletedUtc ?? DateTime.UtcNow,
+            item.Direction,
+            item.FileName,
+            item.LocalDestinationPath,
+            item.RemoteRelativePath,
+            _connectedPeer?.DeviceName ?? "Direct Peer",
+            item.TotalBytes,
+            item.AverageBytesPerSec,
+            item.Status);
+
+        var updated = TransferHistoryStore.Append(AppSettings.GetHistoryFilePath(), entry);
+        _allHistoryItems.Clear();
+        foreach (var h in updated)
+            _allHistoryItems.Add(new TransferHistoryItemViewModel(h));
+        ApplyHistoryFilter();
+    }
+
+    private void RefreshFailedFlag()
+    {
+        HasFailedTransfers = Transfers.Any(t => t.Model.Status == TransferStatus.Failed);
+    }
+
+    public string GetFullLogText() => string.Join(Environment.NewLine, LogEntries);
+
     // --- Transfer Queue Events ---
     private void OnTransferItemAdded(TransferItem item)
     {
@@ -2381,6 +2830,20 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             var vm = new TransferItemViewModel(item, _transferManager);
             _transferMap[item.Id] = vm;
             Transfers.Insert(0, vm);
+            RefreshFailedFlag();
+        });
+    }
+
+    private void OnTransferQueueReordered(TransferItem item)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_transferMap.TryGetValue(item.Id, out var vm)) return;
+            int idx = Transfers.IndexOf(vm);
+            if (idx > 0)
+                Transfers.Move(idx, 0);
+            vm.Refresh();
+            ShowToast($"Moved '{item.FileName}' to top of queue");
         });
     }
 
@@ -2390,6 +2853,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             if (_transferMap.TryGetValue(item.Id, out var vm))
                 vm.Refresh();
+
+            RefreshFailedFlag();
+            RecordHistoryItem(item);
 
             // Debounced auto-refresh of destination pane when transfers finish (prevents UI thrashing on large batches)
             if (item.Status == TransferStatus.Completed)
@@ -2414,6 +2880,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             if (_transferMap.Remove(item.Id, out var vm))
                 Transfers.Remove(vm);
+            RefreshFailedFlag();
         });
     }
 
@@ -2464,6 +2931,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             OverallProgressPercent = snap.OverallProgressPercent;
             AggregateSpeedText = $"{TransferManager.FormatBytes((long)snap.AggregateBytesPerSec)}/s";
+            SpeedSampleRecorded?.Invoke(snap.AggregateBytesPerSec);
             ActiveWorkersText = $"{snap.ActiveWorkers} / {ParallelWorkers} streams";
             EtaText = snap.EstimatedTimeRemaining is { } eta
                 ? (eta.TotalHours >= 1 ? eta.ToString(@"hh\:mm\:ss") : eta.ToString(@"mm\:ss"))
@@ -2474,18 +2942,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 : "Ready — select files on either side to Send or Pull in parallel";
 
             // Detect batch completion (active dropped from >0 to 0 with new completed files)
-            if (_prevActiveTransferCount > 0 && snap.QueuedOrActiveFiles == 0 && snap.CompletedFiles > _prevCompletedTransferCount)
+            bool batchJustCompleted = _prevActiveTransferCount > 0 && snap.QueuedOrActiveFiles == 0 && snap.CompletedFiles > _prevCompletedTransferCount;
+            if (batchJustCompleted && _settings.NotifyOnTransferComplete)
             {
-                if (_settings.NotifyOnTransferComplete)
-                {
-                    int delta = snap.CompletedFiles - _prevCompletedTransferCount;
-                    ShowToast($"Transfer complete — {delta} file(s) finished ({TransferManager.FormatBytes(snap.TotalBytesTransferred)})");
-                }
+                int delta = snap.CompletedFiles - _prevCompletedTransferCount;
+                ShowToast($"Transfer complete — {delta} file(s) finished ({TransferManager.FormatBytes(snap.TotalBytesTransferred)})");
             }
             _prevActiveTransferCount = snap.QueuedOrActiveFiles;
             _prevCompletedTransferCount = snap.CompletedFiles;
 
             _sleepInhibitor.SetActive(PreventSleepDuringTransfers && snap.QueuedOrActiveFiles > 0);
+
+            if (batchJustCompleted && PostTransferActionIndex > 0)
+            {
+                var action = (PostTransferAction)PostTransferActionIndex;
+                PostTransferActionIndex = 0; // Reset after triggering once
+                if (action == PostTransferAction.Disconnect)
+                {
+                    _ = DisconnectPeerAsync();
+                }
+                else if (action is PostTransferAction.Sleep or PostTransferAction.Shutdown)
+                {
+                    _ = RequestPostTransferPowerAction?.Invoke(action);
+                }
+            }
 
             foreach (var vm in Transfers)
             {

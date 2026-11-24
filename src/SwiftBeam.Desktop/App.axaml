@@ -180,5 +180,80 @@
     <Style Selector="Button.pill-ghost:pointerover /template/ ContentPresenter">
       <Setter Property="Background" Value="#1E293B"/>
     </Style>
+    <!-- Pill-Shaped Right-Click Context Menus -->
+    <Style Selector="ContextMenu">
+      <Setter Property="Background" Value="#0F172A"/>
+      <Setter Property="BorderBrush" Value="#334155"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="12"/>
+      <Setter Property="Padding" Value="6"/>
+      <Setter Property="MinWidth" Value="225"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem">
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="10,7"/>
+      <Setter Property="Margin" Value="0,1"/>
+      <Setter Property="Foreground" Value="#E2E8F0"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="FontWeight" Value="Medium"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem /template/ Border#PART_LayoutRoot">
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="Background" Value="Transparent"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem:selected /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#1E293B"/>
+      <Setter Property="BorderBrush" Value="#7C3AED"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem:pointerover /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#1E293B"/>
+      <Setter Property="BorderBrush" Value="#7C3AED"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem:selected">
+      <Setter Property="Foreground" Value="#F8FAFC"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem:disabled">
+      <Setter Property="Opacity" Value="0.45"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.accent">
+      <Setter Property="Foreground" Value="#F3E8FF"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.accent /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#2E1065"/>
+      <Setter Property="BorderBrush" Value="#7C3AED"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.accent:selected /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#7C3AED"/>
+      <Setter Property="BorderBrush" Value="#A78BFA"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.accent:pointerover /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#7C3AED"/>
+      <Setter Property="BorderBrush" Value="#A78BFA"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.accent:selected">
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.danger">
+      <Setter Property="Foreground" Value="#FCA5A5"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.danger:selected /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#450A0A"/>
+      <Setter Property="BorderBrush" Value="#EF4444"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.danger:pointerover /template/ Border#PART_LayoutRoot">
+      <Setter Property="Background" Value="#450A0A"/>
+      <Setter Property="BorderBrush" Value="#EF4444"/>
+    </Style>
+    <Style Selector="ContextMenu MenuItem.danger:selected">
+      <Setter Property="Foreground" Value="#FEE2E2"/>
+    </Style>
+    <Style Selector="ContextMenu Separator">
+      <Setter Property="Background" Value="#1E293B"/>
+      <Setter Property="Height" Value="1"/>
+      <Setter Property="Margin" Value="6,4"/>
+    </Style>
   </Application.Styles>
 </Application>

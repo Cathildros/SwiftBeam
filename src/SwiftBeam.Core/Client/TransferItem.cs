@@ -76,7 +76,11 @@ public sealed class TransferItem : IDisposable
     public string? StatusDetail { get; internal set; }
     public double CurrentSpeedBytesPerSec { get; internal set; }
     public DateTime CreatedUtc { get; } = DateTime.UtcNow;
+    public DateTime? StartedUtc { get; internal set; }
     public DateTime? CompletedUtc { get; internal set; }
+
+    public double AverageBytesPerSec =>
+        TotalBytes / Math.Max(0.1, ((CompletedUtc ?? DateTime.UtcNow) - (StartedUtc ?? CreatedUtc)).TotalSeconds);
 
     public long BytesTransferred
     {
@@ -224,6 +228,7 @@ public sealed class TransferItem : IDisposable
                     length = GetChunkLength(i);
                     if (Status == TransferStatus.Queued || Status == TransferStatus.Reconnecting)
                     {
+                        StartedUtc ??= DateTime.UtcNow;
                         Status = TransferStatus.Transferring;
                         StatusDetail = ResumedFromPartial ? "Resuming..." : null;
                     }

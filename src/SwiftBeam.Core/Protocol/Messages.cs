@@ -114,19 +114,23 @@ public sealed record PushFinalizeAckMessage(
 
 public sealed record ListDirRequestMessage(
     string RelativePath,
-    bool Recursive = false);
+    bool Recursive = false,
+    bool IncludeHidden = false);
 
 public sealed record RemoteEntry(
     string Name,
     string RelativePath,
     bool IsDirectory,
     long Size,
-    DateTime LastModifiedUtc);
+    DateTime LastModifiedUtc,
+    bool IsHidden = false);
 
 public sealed record ListDirResponseMessage(
     string CurrentPath,
     List<RemoteEntry> Entries,
-    string? Error = null);
+    string? Error = null,
+    long? FreeDiskBytes = null,
+    long? TotalDiskBytes = null);
 
 public sealed record FileInfoRequestMessage(
     string RelativePath,

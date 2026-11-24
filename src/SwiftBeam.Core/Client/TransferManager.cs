@@ -119,6 +119,7 @@ public sealed class TransferManager : IAsyncDisposable
     public event Action<TransferItem>? ItemAdded;
     public event Action<TransferItem>? ItemUpdated;
     public event Action<TransferItem>? ItemRemoved;
+    public event Action<TransferItem>? QueueReordered;
     public event Action<TransferTelemetrySnapshot>? TelemetryUpdated;
     public event Action<string>? Log;
 
@@ -278,7 +279,8 @@ public sealed class TransferManager : IAsyncDisposable
         IEnumerable<RemoteEntry> selectedEntries,
         string localRootFolder,
         string remoteBaseFolder,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool includeHidden = false)
     {
         var added = new List<TransferItem>();
         // Preserve leading '/' for Linux full-filesystem paths (e.g. "/home/user/Downloads")
@@ -296,7 +298,7 @@ public sealed class TransferManager : IAsyncDisposable
             else
             {
                 // Recursively list folder contents from remote peer
-                var listing = await browseClient.ListDirectoryAsync(entry.RelativePath, recursive: true, ct).ConfigureAwait(false);
+                var listing = await browseClient.ListDirectoryAsync(entry.RelativePath, recursive: true, includeHidden: includeHidden, ct: ct).ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(listing.Error))
                 {
                     Log?.Invoke($"Error listing '{entry.RelativePath}': {listing.Error}");
@@ -369,6 +371,53 @@ public sealed class TransferManager : IAsyncDisposable
             throw new InvalidOperationException($"Unsafe target path: {remoteRelativePath}");
 
         return resolved;
+    }
+
+    public bool MoveToTop(TransferItem item)
+    {
+        lock (_queueLock)
+        {
+            int idx = _items.IndexOf(item);
+            if (idx < 0 || item.Status is not (TransferStatus.Queued or TransferStatus.Paused))
+                return false;
+
+            if (idx > 0)
+            {
+                _items.RemoveAt(idx);
+                _items.Insert(0, item);
+            }
+        }
+
+        QueueReordered?.Invoke(item);
+        SignalWork(MaxConcurrency);
+        return true;
+    }
+
+    public int RetryAllFailed()
+    {
+        List<TransferItem> retried = [];
+        lock (_queueLock)
+        {
+            foreach (var item in _items)
+            {
+                if (item.Status == TransferStatus.Failed)
+                {
+                    item.Resume();
+                    retried.Add(item);
+                }
+            }
+        }
+
+        foreach (var item in retried)
+            ItemUpdated?.Invoke(item);
+
+        if (retried.Count > 0)
+        {
+            StartEngineIfNeeded();
+            SignalWork(MaxConcurrency);
+        }
+
+        return retried.Count;
     }
 
     public void PauseItem(TransferItem item)

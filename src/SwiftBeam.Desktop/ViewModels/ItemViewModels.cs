@@ -2,8 +2,11 @@ using Avalonia.Media;
 using SwiftBeam.Core.Client;
 using SwiftBeam.Core.Discovery;
 using SwiftBeam.Core.Protocol;
+using SwiftBeam.Core.Settings;
 
 namespace SwiftBeam.Desktop.ViewModels;
+
+public sealed record PathBreadcrumbSegment(string Label, string FullPath, bool IsLast);
 
 public static class FileIcons
 {
@@ -163,6 +166,8 @@ public sealed class RemoteEntryViewModel : ObservableObject
     public string ModifiedText => Entry.IsDirectory && Entry.Size > 0
         ? string.Empty
         : Entry.LastModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+    public bool IsHidden => Entry.IsHidden;
+    public double EntryOpacity => IsHidden ? 0.62 : 1.0;
 
     public bool IsSelected
     {
@@ -190,6 +195,7 @@ public sealed class TransferItemViewModel : ObservableObject
     private bool _canPause;
     private bool _canResume;
     private bool _canCancel;
+    private bool _canMoveToTop;
     private bool _canOpenFolder;
     private IBrush _statusBrush = Brushes.LightSlateGray;
 
@@ -257,6 +263,12 @@ public sealed class TransferItemViewModel : ObservableObject
         private set => SetProperty(ref _canCancel, value);
     }
 
+    public bool CanMoveToTop
+    {
+        get => _canMoveToTop;
+        private set => SetProperty(ref _canMoveToTop, value);
+    }
+
     public bool CanOpenFolder
     {
         get => _canOpenFolder;
@@ -272,6 +284,7 @@ public sealed class TransferItemViewModel : ObservableObject
     public RelayCommand PauseCommand { get; }
     public RelayCommand ResumeCommand { get; }
     public RelayCommand CancelCommand { get; }
+    public RelayCommand MoveToTopCommand { get; }
 
     public TransferItemViewModel(TransferItem model, TransferManager manager)
     {
@@ -279,6 +292,7 @@ public sealed class TransferItemViewModel : ObservableObject
         PauseCommand = new RelayCommand(() => manager.PauseItem(model));
         ResumeCommand = new RelayCommand(() => manager.ResumeItem(model));
         CancelCommand = new RelayCommand(() => manager.CancelItem(model, deletePartialFiles: true));
+        MoveToTopCommand = new RelayCommand(() => manager.MoveToTop(model));
         Refresh();
     }
 
@@ -302,6 +316,7 @@ public sealed class TransferItemViewModel : ObservableObject
         CanPause = Model.Status is TransferStatus.Queued or TransferStatus.Transferring or TransferStatus.Reconnecting;
         CanResume = Model.Status is TransferStatus.Paused or TransferStatus.Failed;
         CanCancel = Model.Status is not (TransferStatus.Completed or TransferStatus.Skipped or TransferStatus.Cancelled);
+        CanMoveToTop = Model.Status is TransferStatus.Queued or TransferStatus.Paused;
         CanOpenFolder = Model.Direction == TransferDirection.Pull && Model.Status is TransferStatus.Completed or TransferStatus.Skipped;
 
         StatusBrush = Model.Status switch
@@ -315,6 +330,37 @@ public sealed class TransferItemViewModel : ObservableObject
             TransferStatus.Failed => BrushRed,
             TransferStatus.Cancelled => BrushMuted,
             _ => BrushLight
+        };
+    }
+}
+
+public sealed class TransferHistoryItemViewModel
+{
+    public TransferHistoryEntry Model { get; }
+    public string DirectionBadge => Model.Direction == TransferDirection.Push ? "SEND ↑" : "PULL ↓";
+    public IBrush DirectionBrush { get; }
+    public string FileName => Model.FileName;
+    public string PeerName => string.IsNullOrWhiteSpace(Model.PeerName) ? "Direct Peer" : Model.PeerName;
+    public string SizeText => TransferManager.FormatBytes(Model.TotalBytes);
+    public string AvgSpeedText => Model.AverageBytesPerSec > 1024
+        ? $"{TransferManager.FormatBytes((long)Model.AverageBytesPerSec)}/s"
+        : string.Empty;
+    public string TimestampText => Model.CompletedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    public string StatusText => Model.FinalStatus.ToString();
+    public IBrush StatusBrush { get; }
+    public bool CanOpenFolder => Model.Direction == TransferDirection.Pull && !string.IsNullOrWhiteSpace(Model.LocalPath);
+
+    public TransferHistoryItemViewModel(TransferHistoryEntry model)
+    {
+        Model = model;
+        DirectionBrush = model.Direction == TransferDirection.Push
+            ? SolidColorBrush.Parse("#34D399")
+            : SolidColorBrush.Parse("#A78BFA");
+        StatusBrush = model.FinalStatus switch
+        {
+            TransferStatus.Completed or TransferStatus.Skipped => SolidColorBrush.Parse("#10B981"),
+            TransferStatus.Failed => SolidColorBrush.Parse("#EF4444"),
+            _ => SolidColorBrush.Parse("#94A3B8")
         };
     }
 }
