@@ -1166,13 +1166,13 @@ public sealed class TransferEngineTests : IDisposable
         await using var client = new TransferClient();
         await client.ConnectAsync(target);
 
-        var defList = await client.ListDirectoryAsync(_shareDir.Replace('\\', '/'), recursive: false, includeHidden: false);
+        var defList = await client.ListDirectoryAsync(string.Empty, recursive: false, includeHidden: false);
         Assert.Null(defList.Error);
         Assert.True(defList.FreeDiskBytes is > 0);
         Assert.Contains(defList.Entries, x => x.Name == "visible.txt" && !x.IsHidden);
         Assert.DoesNotContain(defList.Entries, x => x.Name == ".env");
 
-        var fullList = await client.ListDirectoryAsync(_shareDir.Replace('\\', '/'), recursive: false, includeHidden: true);
+        var fullList = await client.ListDirectoryAsync(string.Empty, recursive: false, includeHidden: true);
         Assert.Contains(fullList.Entries, x => x.Name == ".env" && x.IsHidden);
     }
 
@@ -1191,13 +1191,13 @@ public sealed class TransferEngineTests : IDisposable
         await using var client = new TransferClient();
         await client.ConnectAsync(target);
 
-        var (bigData, bigSize, bigTrunc) = await client.ReadFilePreviewAsync(bigText.Replace('\\', '/'), maxBytes: 512);
+        var (bigData, bigSize, bigTrunc) = await client.ReadFilePreviewAsync("preview_big.txt", maxBytes: 512);
         Assert.True(bigTrunc);
         Assert.Equal(1200, bigSize);
         Assert.Equal(512, bigData.Length);
         Assert.All(bigData, b => Assert.Equal((byte)'A', b));
 
-        var (smallData, smallSize, smallTrunc) = await client.ReadFilePreviewAsync(smallText.Replace('\\', '/'), maxBytes: 512);
+        var (smallData, smallSize, smallTrunc) = await client.ReadFilePreviewAsync("preview_small.txt", maxBytes: 512);
         Assert.False(smallTrunc);
         Assert.Equal(13, smallSize);
         Assert.Equal("Hello Preview", System.Text.Encoding.UTF8.GetString(smallData));
