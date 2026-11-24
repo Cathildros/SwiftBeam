@@ -47,6 +47,11 @@ public sealed class AppSettings
     public bool NotifyOnTransferComplete { get; set; } = true;
     public string UpdateRepo { get; set; } = "Cathildros/SwiftBeam";
     public bool AutoCheckUpdates { get; set; } = true;
+    public bool ReadOnlyShare { get; set; } = false;
+    public bool RequireHostApproval { get; set; } = false;
+    public bool UseSmartCompression { get; set; } = false;
+    public bool PreventSleepDuringTransfers { get; set; } = true;
+    public bool StartWithSystem { get; set; } = false;
     public List<SavedPeerEntry> SavedPeers { get; set; } = [];
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -61,6 +66,12 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(appData))
             appData = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return Path.Combine(appData, "SwiftBeam", "settings.json");
+    }
+
+    public static string GetPendingQueueFilePath()
+    {
+        string dir = Path.GetDirectoryName(GetSettingsFilePath()) ?? AppDomain.CurrentDomain.BaseDirectory;
+        return Path.Combine(dir, "pending-queue.json");
     }
 
     public static string GetDefaultShareDir()

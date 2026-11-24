@@ -905,6 +905,251 @@ public sealed class TransferEngineTests : IDisposable
         Assert.Null(upToDate);
     }
 
+    [Fact]
+    public async Task SmartCompression_PullAndPushCompressibleTextAndSkipIncompressible()
+    {
+        Assert.True(CompressionHelper.ShouldCompressFile("notes.txt"));
+        Assert.True(CompressionHelper.ShouldCompressFile("app.log"));
+        Assert.False(CompressionHelper.ShouldCompressFile("video.mp4"));
+        Assert.False(CompressionHelper.ShouldCompressFile("archive.zip"));
+
+        // Create highly compressible 2 MB text file
+        string pullSrc = Path.Combine(_shareDir, "compressible_pull.log");
+        string repeatedLine = "2026-11-24 INFO SwiftBeam parallel chunk telemetry latency=0.4ms ok\n";
+        string textContent = string.Concat(Enumerable.Repeat(repeatedLine, 32 * 1024));
+        await File.WriteAllTextAsync(pullSrc, textContent);
+        string expectedHash = ComputeSha256(pullSrc);
+
+        await using var server = new FileShareServer(new FileShareServerOptions
+        {
+            DeviceName = "CompHost",
+            Port = 0,
+            SharedDirectory = _shareDir,
+            AllowFullFilesystem = true,
+            RequirePin = true,
+            Pin = "654321",
+            AllowUnencrypted = true
+        });
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "654321", UseTls: true, "CompClient");
+        await using var browse = new TransferClient();
+        await browse.ConnectAsync(target);
+
+        await using var manager = new TransferManager
+        {
+            MaxConcurrency = 2,
+            ChunkSizeBytes = 512 * 1024,
+            VerifySha256 = true,
+            UseSmartCompression = true
+        };
+        manager.ConfigureTarget(target);
+
+        var fi = new FileInfo(pullSrc);
+        string pullDest = Path.Combine(_downloadDir, "compressible_pull.log");
+        var pullItem = manager.EnqueueFile(new RemoteEntry("compressible_pull.log", pullSrc.Replace('\\', '/'), false, fi.Length, fi.LastWriteTimeUtc), pullDest);
+
+        string pushSrc = Path.Combine(_downloadDir, "compressible_push.txt");
+        await File.WriteAllTextAsync(pushSrc, textContent);
+        string pushDestWire = Path.Combine(_shareDir, "compressible_push_out.txt").Replace('\\', '/');
+        var pushItem = manager.EnqueuePushFile(pushSrc, pushDestWire);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await manager.WaitForAllAsync(cts.Token);
+
+        Assert.True(pullItem.Status == TransferStatus.Completed, pullItem.StatusDetail);
+        Assert.True(pushItem.Status == TransferStatus.Completed, pushItem.StatusDetail);
+        Assert.Equal(expectedHash, ComputeSha256(pullDest));
+        Assert.Equal(expectedHash, ComputeSha256(Path.Combine(_shareDir, "compressible_push_out.txt")));
+    }
+
+    [Fact]
+    public async Task ReadOnlyMode_AllowsPullAndBlocksWriteDeleteRename()
+    {
+        string srcPath = Path.Combine(_shareDir, "readonly_sample.txt");
+        await File.WriteAllTextAsync(srcPath, "read only download ok");
+        string expectedHash = ComputeSha256(srcPath);
+
+        await using var server = new FileShareServer(new FileShareServerOptions
+        {
+            DeviceName = "ReadOnlyHost",
+            Port = 0,
+            SharedDirectory = _shareDir,
+            AllowFullFilesystem = false,
+            RequirePin = true,
+            Pin = "112233",
+            AllowUnencrypted = true,
+            ReadOnly = true
+        });
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "112233", UseTls: true, "RoClient");
+        await using var client = new TransferClient();
+        var meta = await client.ConnectAsync(target);
+        Assert.True(meta.ReadOnly);
+
+        // Write/edit control commands must be rejected
+        var mk = await client.CreateDirectoryAsync("blocked_dir");
+        Assert.False(mk.Success);
+        Assert.Contains("Read-Only", mk.Error);
+
+        var rn = await client.RenamePathAsync("readonly_sample.txt", "renamed.txt");
+        Assert.False(rn.Success);
+
+        var del = await client.DeletePathAsync("readonly_sample.txt");
+        Assert.False(del.Success);
+        Assert.True(File.Exists(srcPath));
+
+        // Push must also fail safely without corrupting connection
+        string localUpload = Path.Combine(_downloadDir, "upload.txt");
+        await File.WriteAllTextAsync(localUpload, "blocked upload");
+        var pushAck = await client.PushRangeAsync("upload.txt", localUpload, new FileInfo(localUpload).Length, DateTime.UtcNow, 0, new FileInfo(localUpload).Length, _ => { });
+        Assert.False(pushAck.Success);
+        Assert.Contains("Read-Only", pushAck.Error);
+
+        // Pull still succeeds
+        var fi = new FileInfo(srcPath);
+        await using var manager = new TransferManager { MaxConcurrency = 1, VerifySha256 = true };
+        manager.ConfigureTarget(target);
+        string dest = Path.Combine(_downloadDir, "readonly_pulled.txt");
+        var item = manager.EnqueueFile(new RemoteEntry("readonly_sample.txt", "readonly_sample.txt", false, fi.Length, fi.LastWriteTimeUtc), dest);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await manager.WaitForAllAsync(cts.Token);
+        Assert.Equal(TransferStatus.Completed, item.Status);
+        Assert.Equal(expectedHash, ComputeSha256(dest));
+    }
+
+    [Fact]
+    public async Task HostApproval_DeclinesWhenRejected_AndApprovesOnceAcrossParallelStreams()
+    {
+        string srcPath = Path.Combine(_shareDir, "approved_file.bin");
+        string expectedHash = CreateRandomFile(srcPath, 4 * 1024 * 1024);
+
+        bool allowNext = false;
+        int approvalCalls = 0;
+
+        await using var server = new FileShareServer(new FileShareServerOptions
+        {
+            DeviceName = "ApprovalHost",
+            Port = 0,
+            SharedDirectory = _shareDir,
+            AllowFullFilesystem = false,
+            RequirePin = true,
+            Pin = "778899",
+            AllowUnencrypted = true,
+            RequireHostApproval = true
+        });
+        server.ConnectionApprovalHandler = (_, _, _) =>
+        {
+            Interlocked.Increment(ref approvalCalls);
+            return Task.FromResult(allowNext);
+        };
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "778899", UseTls: true, "GuestPC");
+        await using var rejectedClient = new TransferClient();
+        var ex = await Assert.ThrowsAsync<UnauthorizedAccessException>(() => rejectedClient.ConnectAsync(target));
+        Assert.Contains("declined", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+        // Now approve and run multi-stream transfer (should prompt only once per session)
+        allowNext = true;
+        Volatile.Write(ref approvalCalls, 0);
+
+        await using var approvedClient = new TransferClient();
+        await approvedClient.ConnectAsync(target);
+
+        await using var manager = new TransferManager
+        {
+            MaxConcurrency = 3,
+            ChunkSizeBytes = 512 * 1024,
+            VerifySha256 = true
+        };
+        manager.ConfigureTarget(target);
+        var fi = new FileInfo(srcPath);
+        string dest = Path.Combine(_downloadDir, "approved_out.bin");
+        var item = manager.EnqueueFile(new RemoteEntry("approved_file.bin", "approved_file.bin", false, fi.Length, fi.LastWriteTimeUtc), dest);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await manager.WaitForAllAsync(cts.Token);
+
+        Assert.Equal(TransferStatus.Completed, item.Status);
+        Assert.Equal(expectedHash, ComputeSha256(dest));
+        Assert.Equal(1, Volatile.Read(ref approvalCalls));
+    }
+
+    [Fact]
+    public async Task QuickTextShare_DeliversTextToHostEvent()
+    {
+        await using var server = CreateServer(pin: "990011", allowUnencrypted: true);
+        string? receivedSender = null;
+        string? receivedText = null;
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.TextReceived += (sender, text) =>
+        {
+            receivedSender = sender;
+            receivedText = text;
+            tcs.TrySetResult();
+        };
+        server.Start();
+
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "990011", UseTls: true, "SenderLaptop");
+        await using var client = new TransferClient();
+        await client.ConnectAsync(target);
+
+        var ack = await client.SendTextAsync("https://example.com/share?id=42", "SenderLaptop");
+        Assert.True(ack.Success);
+        await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("SenderLaptop", receivedSender);
+        Assert.Equal("https://example.com/share?id=42", receivedText);
+    }
+
+    [Fact]
+    public async Task QueuePersistence_SavesAndRestoresUnfinishedTransfersPaused()
+    {
+        string queueFile = Path.Combine(_rootTemp, "pending-queue.json");
+        string doneSrc = Path.Combine(_shareDir, "persisted_done.bin");
+        CreateRandomFile(doneSrc, 64 * 1024);
+
+        await using var server = CreateServer(pin: "123789", allowUnencrypted: true);
+        server.Start();
+        var target = new ConnectionTarget("127.0.0.1", server.ListeningPort, "123789", UseTls: false, "PersistClient");
+
+        string localPushSrc = Path.Combine(_downloadDir, "local_push_queued.bin");
+        CreateRandomFile(localPushSrc, 512 * 1024);
+
+        await using (var manager1 = new TransferManager { MaxConcurrency = 1, VerifySha256 = false })
+        {
+            manager1.ConfigureTarget(target);
+            var fiDone = new FileInfo(doneSrc);
+            var doneItem = manager1.EnqueueFile(new RemoteEntry("persisted_done.bin", "persisted_done.bin", false, fiDone.Length, fiDone.LastWriteTimeUtc),
+                Path.Combine(_downloadDir, "persisted_done.bin"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await manager1.WaitForAllAsync(cts.Token);
+            Assert.Equal(TransferStatus.Completed, doneItem.Status);
+
+            var pendingPull = manager1.EnqueueFile(new RemoteEntry("missing_yet.bin", "missing_yet.bin", false, 2_000_000, DateTime.UtcNow),
+                Path.Combine(_downloadDir, "missing_yet.bin"));
+            manager1.PauseItem(pendingPull);
+
+            var pendingPush = manager1.EnqueuePushFile(localPushSrc, "uploaded_later.bin");
+            manager1.PauseItem(pendingPush);
+
+            manager1.SavePendingQueue(queueFile);
+        }
+
+        Assert.True(File.Exists(queueFile));
+
+        await using var manager2 = new TransferManager();
+        int loaded = manager2.LoadPendingQueue(queueFile);
+        Assert.Equal(2, loaded);
+        var snap = manager2.GetItemsSnapshot();
+        Assert.Equal(2, snap.Count);
+        Assert.All(snap, item => Assert.Equal(TransferStatus.Paused, item.Status));
+        Assert.Contains(snap, x => x.Direction == TransferDirection.Pull && x.RemoteRelativePath == "missing_yet.bin");
+        Assert.Contains(snap, x => x.Direction == TransferDirection.Push && x.LocalDestinationPath == localPushSrc);
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }

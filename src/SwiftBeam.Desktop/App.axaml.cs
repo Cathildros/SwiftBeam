@@ -39,6 +39,10 @@ public partial class App : Application
             if (appIcon is not null)
                 win.Icon = appIcon;
 
+            var startMinimized = desktop.Args?.Any(a =>
+                string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(a, "--tray", StringComparison.OrdinalIgnoreCase)) == true;
+
             // Intercept window close when MinimizeToTrayOnClose is enabled
             win.Closing += (_, e) =>
             {
@@ -46,6 +50,11 @@ public partial class App : Application
                 {
                     e.Cancel = true;
                     win.Hide();
+                }
+                else if (!_isExplicitExit && !vm.MinimizeToTrayOnClose)
+                {
+                    _isExplicitExit = true;
+                    desktop.Shutdown();
                 }
             };
 
@@ -97,11 +106,40 @@ public partial class App : Application
                 // Non-fatal on headless/minimal Linux WMs without system tray support
             }
 
-            desktop.MainWindow = win;
+            if (startMinimized)
+            {
+                desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            }
+            else
+            {
+                desktop.MainWindow = win;
+            }
+
             vm.RequestAppShutdown = () =>
             {
                 _isExplicitExit = true;
                 desktop.Shutdown();
+            };
+            vm.RequestClipboardCopy = async text =>
+            {
+                if (win.Clipboard is not null)
+                    await win.Clipboard.SetTextAsync(text);
+            };
+            vm.HostApprovalPromptHandler = async (clientName, remoteIp, isWriteSession) =>
+            {
+                return await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(async () =>
+                {
+                    ShowMainWindow(win);
+                    var accessText = isWriteSession ? "browse & read/write access" : "browse & download access";
+                    var peerLabel = string.IsNullOrWhiteSpace(clientName) ? remoteIp : $"{clientName} ({remoteIp})";
+                    return await InputDialog.ShowConfirmAsync(
+                        win,
+                        "Allow Connection Request",
+                        $"{peerLabel} wants to connect with {accessText}. Allow this connection?",
+                        confirmLabel: "Allow",
+                        isPrimaryConfirm: true,
+                        cancelLabel: "Decline");
+                });
             };
             InstanceGuard?.StartListening(() => Avalonia.Threading.Dispatcher.UIThread.Post(() => ShowMainWindow(win)));
             desktop.ShutdownRequested += async (_, _) =>
@@ -117,6 +155,10 @@ public partial class App : Application
 
     private static void ShowMainWindow(Window win)
     {
+        if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime d && d.MainWindow is null)
+        {
+            d.MainWindow = win;
+        }
         if (!win.IsVisible)
             win.Show();
         if (win.WindowState == WindowState.Minimized)

@@ -25,7 +25,8 @@ public sealed record ConnectedPeerMetadata(
     string? HomePath = null,
     string? DesktopPath = null,
     string? DownloadsPath = null,
-    string? DocumentsPath = null);
+    string? DocumentsPath = null,
+    bool ReadOnly = false);
 
 public sealed class TransferClient : IAsyncDisposable
 {
@@ -121,7 +122,8 @@ public sealed class TransferClient : IAsyncDisposable
                 authResult.HomePath,
                 authResult.DesktopPath,
                 authResult.DownloadsPath,
-                authResult.DocumentsPath);
+                authResult.DocumentsPath,
+                authResult.ReadOnly);
 
             return PeerMetadata;
         }
@@ -212,6 +214,21 @@ public sealed class TransferClient : IAsyncDisposable
         }
     }
 
+    public async Task<SendTextAckMessage> SendTextAsync(string text, string senderName, CancellationToken ct = default)
+    {
+        await _ioLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var stream = EnsureStream();
+            await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.SendTextRequest, new SendTextRequestMessage(text, senderName), ct).ConfigureAwait(false);
+            return await FrameProtocol.ReadJsonFrameAsync<SendTextAckMessage>(stream, FrameType.SendTextAck, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ioLock.Release();
+        }
+    }
+
     public async Task<PushChunkAckMessage> PushRangeAsync(
         string remoteRelativePath,
         string localSourcePath,
@@ -220,24 +237,29 @@ public sealed class TransferClient : IAsyncDisposable
         long offset,
         long length,
         Action<int> onBytesSent,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool allowCompression = false)
     {
         await _ioLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var stream = EnsureStream();
+            bool allowCompress = allowCompression && CompressionHelper.ShouldCompressFile(localSourcePath);
             await FrameProtocol.WriteJsonFrameAsync(
                 stream,
                 FrameType.PushChunkRequest,
-                new PushChunkRequestMessage(remoteRelativePath, totalFileSize, offset, length, lastModifiedUtc),
+                new PushChunkRequestMessage(remoteRelativePath, totalFileSize, offset, length, lastModifiedUtc, allowCompress),
                 ct).ConfigureAwait(false);
 
             if (length > 0)
             {
                 using var handle = File.OpenHandle(localSourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileOptions.Asynchronous | FileOptions.SequentialScan);
                 int frameBufSize = 5 + ProtocolConstants.DataFrameChunkBytes;
+                int compBufSize = 9 + ProtocolConstants.DataFrameChunkBytes;
                 byte[] bufA = ArrayPool<byte>.Shared.Rent(frameBufSize);
                 byte[] bufB = ArrayPool<byte>.Shared.Rent(frameBufSize);
+                byte[]? compA = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
+                byte[]? compB = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
                 Task? pendingSend = null;
                 try
                 {
@@ -248,6 +270,7 @@ public sealed class TransferClient : IAsyncDisposable
                     while (remaining > 0)
                     {
                         byte[] curBuf = useA ? bufA : bufB;
+                        byte[]? curComp = useA ? compA : compB;
                         int toRead = (int)Math.Min(remaining, ProtocolConstants.DataFrameChunkBytes);
                         int read = await RandomAccess.ReadAsync(handle, curBuf.AsMemory(5, toRead), pos, ct).ConfigureAwait(false);
                         if (read == 0) break;
@@ -255,7 +278,14 @@ public sealed class TransferClient : IAsyncDisposable
                         if (pendingSend is not null)
                             await pendingSend.ConfigureAwait(false);
 
-                        pendingSend = FrameProtocol.WritePreframedDataAsync(stream, curBuf, read, ct).AsTask();
+                        if (curComp is not null && CompressionHelper.TryCompressPreframed(curBuf.AsSpan(5, read), curComp, out int compPacketBytes))
+                        {
+                            pendingSend = stream.WriteAsync(curComp.AsMemory(0, compPacketBytes), ct).AsTask();
+                        }
+                        else
+                        {
+                            pendingSend = FrameProtocol.WritePreframedDataAsync(stream, curBuf, read, ct).AsTask();
+                        }
                         pos += read;
                         remaining -= read;
                         useA = !useA;
@@ -273,6 +303,8 @@ public sealed class TransferClient : IAsyncDisposable
                     }
                     ArrayPool<byte>.Shared.Return(bufA);
                     ArrayPool<byte>.Shared.Return(bufB);
+                    if (compA is not null) ArrayPool<byte>.Shared.Return(compA);
+                    if (compB is not null) ArrayPool<byte>.Shared.Return(compB);
                 }
             }
 
@@ -315,14 +347,16 @@ public sealed class TransferClient : IAsyncDisposable
         long length,
         Func<ReadOnlyMemory<byte>, long, CancellationToken, ValueTask> onDataReceived,
         CancellationToken ct = default,
-        Action<int>? onNetworkBytesProgress = null)
+        Action<int>? onNetworkBytesProgress = null,
+        bool allowCompression = false)
     {
         await _ioLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var stream = EnsureStream();
+            bool allowCompress = allowCompression && CompressionHelper.ShouldCompressFile(relativePath);
             await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PullRangeRequest,
-                new PullRangeRequestMessage(relativePath, offset, length), ct).ConfigureAwait(false);
+                new PullRangeRequestMessage(relativePath, offset, length, allowCompress), ct).ConfigureAwait(false);
 
             var header = await FrameProtocol.ReadJsonFrameAsync<PullRangeHeaderMessage>(stream, FrameType.PullRangeHeader, ct).ConfigureAwait(false);
             if (!header.Success)
@@ -330,6 +364,7 @@ public sealed class TransferClient : IAsyncDisposable
 
             byte[] bufA = ArrayPool<byte>.Shared.Rent(ProtocolConstants.DataFrameChunkBytes);
             byte[] bufB = ArrayPool<byte>.Shared.Rent(ProtocolConstants.DataFrameChunkBytes);
+            byte[]? compBuf = allowCompress ? ArrayPool<byte>.Shared.Rent(ProtocolConstants.DataFrameChunkBytes + 1024) : null;
             Task? pendingWrite = null;
             try
             {
@@ -352,6 +387,31 @@ public sealed class TransferClient : IAsyncDisposable
                             await FrameProtocol.ReadExactAsync(stream, errPayload, ct).ConfigureAwait(false);
                         var err = FrameProtocol.DeserializePayload<ErrorMessage>(errPayload);
                         throw new InvalidOperationException(err.Message);
+                    }
+
+                    if (frameHeader.Type == FrameType.CompressedDataChunk)
+                    {
+                        compBuf ??= ArrayPool<byte>.Shared.Rent(Math.Max(ProtocolConstants.DataFrameChunkBytes + 1024, frameHeader.Length));
+                        if (frameHeader.Length > compBuf.Length)
+                        {
+                            ArrayPool<byte>.Shared.Return(compBuf);
+                            compBuf = ArrayPool<byte>.Shared.Rent(frameHeader.Length);
+                        }
+
+                        await FrameProtocol.ReadExactAsync(stream, compBuf.AsMemory(0, frameHeader.Length), ct).ConfigureAwait(false);
+                        byte[] curBuf = useA ? bufA : bufB;
+                        int rawLen = CompressionHelper.DecompressFramePayload(compBuf.AsSpan(0, frameHeader.Length), curBuf.AsSpan(0, ProtocolConstants.DataFrameChunkBytes));
+                        onNetworkBytesProgress?.Invoke(rawLen);
+
+                        if (pendingWrite is not null)
+                            await pendingWrite.ConfigureAwait(false);
+
+                        long targetOffset = writePos;
+                        pendingWrite = onDataReceived(curBuf.AsMemory(0, rawLen), targetOffset, ct).AsTask();
+                        writePos += rawLen;
+                        received += rawLen;
+                        useA = !useA;
+                        continue;
                     }
 
                     if (frameHeader.Type != FrameType.DataChunk)
@@ -392,6 +452,7 @@ public sealed class TransferClient : IAsyncDisposable
                 }
                 ArrayPool<byte>.Shared.Return(bufA);
                 ArrayPool<byte>.Shared.Return(bufB);
+                if (compBuf is not null) ArrayPool<byte>.Shared.Return(compBuf);
             }
         }
         finally

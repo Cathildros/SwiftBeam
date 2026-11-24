@@ -11,7 +11,7 @@
         Background="#0B1120"
         Foreground="#F1F5F9">
 
-  <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,*">
+  <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,*">
     <!-- Top Header Bar (Navigation Pills + Shifting Connect Pill + Compact Host Menu) -->
     <Border Grid.Row="0" Background="#0F172A" BorderBrush="#1E293B" BorderThickness="0,0,0,1" Padding="12,7">
       <Grid ColumnDefinitions="Auto,10,Auto,*,Auto,8,Auto">
@@ -228,15 +228,34 @@
             </StackPanel>
           </Border>
 
-          <!-- Connected: Bold Emerald Pill + Compact Disconnect -->
+          <!-- Connected: Bold Emerald Pill + Quick Text Share + Compact Disconnect -->
           <Border IsVisible="{Binding IsConnected}"
                   Background="#06372E" BorderBrush="#10B981" BorderThickness="1.2"
                   CornerRadius="10" Padding="9,3" VerticalAlignment="Center"
                   ToolTip.Tip="{Binding ConnectedPeerSummary}">
-            <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
               <Ellipse Width="8" Height="8" Fill="#10B981" VerticalAlignment="Center"/>
               <TextBlock Text="{Binding ConnectedPeerShortName}" FontSize="11.5" FontWeight="SemiBold" Foreground="#ECFDF5"
                          MaxWidth="180" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+              <Button x:Name="ShareTextPillButton" Content="Text" Classes="subtle" CornerRadius="7" Padding="8,3" FontSize="11"
+                      Click="OnOpenShareTextFlyoutClick"
+                      ToolTip.Tip="Send a quick text snippet, link, or clipboard text to the connected computer">
+                <FlyoutBase.AttachedFlyout>
+                  <Flyout Placement="BottomEdgeAlignedRight" FlyoutPresenterClasses="swift-popover">
+                    <StackPanel Width="290" Spacing="8">
+                      <TextBlock Text="Send Quick Text / Snippet" FontSize="12.5" FontWeight="Bold" Foreground="#F8FAFC"/>
+                      <TextBox x:Name="ShareTextBox" Classes="pill" Text="{Binding ShareTextInput}"
+                               AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64" MaxHeight="120"
+                               Watermark="Paste link, code, or message..."
+                               KeyDown="OnShareTextInputKeyDown"/>
+                      <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right">
+                        <Button Content="Send Text" Classes="primary" CornerRadius="8" Padding="12,5" FontSize="11.5"
+                                Command="{Binding SendSharedTextCommand}" Click="OnSendShareTextCloseFlyoutClick"/>
+                      </StackPanel>
+                    </StackPanel>
+                  </Flyout>
+                </FlyoutBase.AttachedFlyout>
+              </Button>
               <Button Content="Disconnect" Classes="danger" CornerRadius="7" Padding="9,3" FontSize="11"
                       Command="{Binding DisconnectCommand}"/>
             </StackPanel>
@@ -379,8 +398,32 @@
       </Grid>
     </Border>
 
-    <!-- Compact Dismissible Error Banner -->
+    <!-- Received Quick Text Share Banner -->
     <Border Grid.Row="4"
+            IsVisible="{Binding HasReceivedText}"
+            Background="#1E1B4B"
+            BorderBrush="#8B5CF6"
+            BorderThickness="0,0,0,1"
+            Padding="16,8">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Border Background="#7C3AED" CornerRadius="6" Padding="8,2" VerticalAlignment="Center">
+            <TextBlock Text="TEXT RECEIVED" FontSize="10" FontWeight="Bold" Foreground="White"/>
+          </Border>
+          <TextBlock Text="{Binding ReceivedTextSender}" FontSize="12" FontWeight="Bold" Foreground="#DDD6FE" VerticalAlignment="Center"/>
+          <TextBlock Text="{Binding ReceivedTextPreview}" FontSize="12" Foreground="#F8FAFC" VerticalAlignment="Center"
+                     TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding ReceivedTextContent}"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <Button Content="Copy" Classes="primary" CornerRadius="8" Padding="11,4" FontSize="11.5" Click="OnCopyReceivedTextClick"/>
+          <Button Content="✕" Classes="subtle" CornerRadius="6" Padding="7,3" FontSize="11"
+                  Command="{Binding DismissReceivedTextCommand}" ToolTip.Tip="Dismiss text notice"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Compact Dismissible Error Banner -->
+    <Border Grid.Row="5"
             IsVisible="{Binding HasConnectionError}"
             Background="#2A1215"
             BorderBrush="#DC2626"
@@ -395,7 +438,7 @@
     </Border>
 
     <!-- Main Content Area (controlled by top header pills — no wasted TabControl strip!) -->
-    <Grid Grid.Row="5" Margin="10,8,10,10">
+    <Grid Grid.Row="6" Margin="10,8,10,10">
       <!-- VIEW 1: RustDesk-Style Dual-Pane File Transfer -->
       <Grid x:Name="TransferWorkspaceGrid"
             IsVisible="{Binding IsTransferTabActive}"
@@ -480,11 +523,27 @@
                   </Border>
                 </Grid>
 
-                <!-- Compact Local Files List -->
-                <Grid Grid.Row="8">
-                  <ListBox Classes="file-list"
+                <!-- Compact Local Files List (supports Drag & Drop from Remote pane) -->
+                <Grid Grid.Row="8" x:Name="LocalDropZone" DragDrop.AllowDrop="True">
+                  <ListBox x:Name="LocalFileList"
+                           Classes="file-list"
                            ItemsSource="{Binding FilteredLocalEntries}"
-                           DoubleTapped="OnLocalEntryDoubleTapped">
+                           DoubleTapped="OnLocalEntryDoubleTapped"
+                           KeyDown="OnLocalListKeyDown">
+                    <ListBox.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Send to Remote" IsEnabled="{Binding CanWriteRemote}" Click="OnLocalContextSendClick"/>
+                        <Separator/>
+                        <MenuItem Header="Open" Click="OnLocalContextOpenClick"/>
+                        <MenuItem Header="Reveal in File Manager" Click="OnLocalContextRevealClick"/>
+                        <Separator/>
+                        <MenuItem Header="New Folder..." Click="OnLocalNewFolderClick"/>
+                        <MenuItem Header="Rename..." Click="OnLocalContextRenameClick"/>
+                        <MenuItem Header="Delete..." Click="OnLocalContextDeleteClick"/>
+                        <Separator/>
+                        <MenuItem Header="Copy Path" Click="OnLocalContextCopyPathClick"/>
+                      </ContextMenu>
+                    </ListBox.ContextMenu>
                     <ListBox.ItemTemplate>
                       <DataTemplate x:DataType="vm:RemoteEntryViewModel">
                         <Grid ColumnDefinitions="24,22,*,52,108,74" VerticalAlignment="Center">
@@ -542,7 +601,7 @@
                     <Button Content="Downloads" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteDownloadsCommand}"/>
                     <Button Content="Documents" Classes="subtle" Padding="7,3" FontSize="11" Command="{Binding RemoteDocumentsCommand}"/>
                   </StackPanel>
-                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="3" IsVisible="{Binding IsConnected}">
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="3" IsVisible="{Binding IsConnected}" IsEnabled="{Binding CanWriteRemote}">
                     <Button Classes="subtle" Padding="6,3" Click="OnRemoteNewFolderClick" ToolTip.Tip="New Remote Folder">
                       <PathIcon Data="M10,4L12,6H20A2,2 0 0,1 22,8V18A2,2 0 0,1 20,20H4C2.89,20 2,19.1 2,18V6C2,4.89 2.89,4 4,4H10M15,9V12H12V14H15V17H17V14H20V12H17V9H15Z" Width="13" Height="13"/>
                     </Button>
@@ -590,11 +649,25 @@
                   </Border>
                 </Grid>
 
-                <!-- Compact Remote Files List (supports Drag & Drop from OS file manager) -->
+                <!-- Compact Remote Files List (supports Drag & Drop from Local pane or OS file manager) -->
                 <Grid Grid.Row="8" x:Name="RemoteDropZone" DragDrop.AllowDrop="True">
-                  <ListBox Classes="file-list"
+                  <ListBox x:Name="RemoteFileList"
+                           Classes="file-list"
                            ItemsSource="{Binding FilteredRemoteEntries}"
-                           DoubleTapped="OnRemoteEntryDoubleTapped">
+                           DoubleTapped="OnRemoteEntryDoubleTapped"
+                           KeyDown="OnRemoteListKeyDown">
+                    <ListBox.ContextMenu>
+                      <ContextMenu>
+                        <MenuItem Header="Receive (Download)" Click="OnRemoteContextPullClick"/>
+                        <MenuItem Header="Open" Click="OnRemoteContextOpenClick"/>
+                        <Separator/>
+                        <MenuItem Header="New Folder..." IsEnabled="{Binding CanWriteRemote}" Click="OnRemoteNewFolderClick"/>
+                        <MenuItem Header="Rename..." IsEnabled="{Binding CanWriteRemote}" Click="OnRemoteContextRenameClick"/>
+                        <MenuItem Header="Delete..." IsEnabled="{Binding CanWriteRemote}" Click="OnRemoteContextDeleteClick"/>
+                        <Separator/>
+                        <MenuItem Header="Copy Remote Path" Click="OnRemoteContextCopyPathClick"/>
+                      </ContextMenu>
+                    </ListBox.ContextMenu>
                     <ListBox.ItemTemplate>
                       <DataTemplate x:DataType="vm:RemoteEntryViewModel">
                         <Grid ColumnDefinitions="24,22,*,52,108,74" VerticalAlignment="Center">
@@ -720,6 +793,8 @@
                           </StackPanel>
 
                           <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="4">
+                            <Button Content="Open Folder" Classes="subtle" Padding="6,2" FontSize="10"
+                                    IsVisible="{Binding CanOpenFolder}" Click="OnOpenTransferFolderClick"/>
                             <Button Content="Pause" Classes="subtle" Padding="6,2" FontSize="10"
                                     IsVisible="{Binding CanPause}" Command="{Binding PauseCommand}"/>
                             <Button Content="Resume" Classes="primary" Padding="6,2" FontSize="10"
@@ -794,6 +869,8 @@
 
                 <CheckBox IsChecked="{Binding HostRequirePin}" Content="Require Pairing PIN for incoming connections"/>
                 <CheckBox IsChecked="{Binding HostAllowUnencrypted}" Content="Allow unencrypted direct-cable mode (clients can toggle TLS off for max speed)"/>
+                <CheckBox IsChecked="{Binding HostReadOnlyShare}" Content="Read-Only share mode (allow browsing &amp; downloads only; block uploads, renames, and deletes)"/>
+                <CheckBox IsChecked="{Binding HostRequireApproval}" Content="Ask me before allowing incoming computer connections"/>
 
                 <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="10" Padding="12,9">
                   <StackPanel Spacing="2">
@@ -839,8 +916,23 @@
                   </StackPanel>
                 </Grid>
 
+                <CheckBox IsChecked="{Binding UseSmartCompression}" Content="Smart Brotli compression for text, code, and compressible files (auto-skipped on zips/media)"/>
+                <CheckBox IsChecked="{Binding PreventSleepDuringTransfers}" Content="Keep computer awake while transfers are active"/>
+                <CheckBox IsChecked="{Binding StartWithSystem}" Content="Launch SwiftBeam automatically at login (minimized to system tray)"/>
                 <CheckBox IsChecked="{Binding MinimizeToTrayOnClose}" Content="Minimize to system tray when closing window (keeps SwiftBeam ready in background)"/>
                 <CheckBox IsChecked="{Binding NotifyOnTransferComplete}" Content="Show completion alert when transfer queue finishes"/>
+
+                <Border IsVisible="{Binding IsLinuxPlatform}" Background="#0B1120" BorderBrush="#3B2466" BorderThickness="1" CornerRadius="10" Padding="12">
+                  <Grid ColumnDefinitions="*,12,Auto">
+                    <StackPanel Grid.Column="0" Spacing="2">
+                      <TextBlock Text="Linux Desktop Integration" FontSize="13" FontWeight="SemiBold" Foreground="#C4B5FD"/>
+                      <TextBlock Text="Add SwiftBeam to your App Launcher &amp; Desktop so you can search and launch it anytime."
+                                 FontSize="11" Foreground="#94A3B8" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <Button Grid.Column="2" Content="Install to App Menu &amp; Desktop" Classes="primary" CornerRadius="8"
+                            Padding="11,6" FontSize="11.5" VerticalAlignment="Center" Click="OnLinuxSelfInstallClick"/>
+                  </Grid>
+                </Border>
 
                 <StackPanel Spacing="6" IsVisible="{Binding HasSavedPeers}">
                   <TextBlock Text="Saved / Trusted Computers" FontSize="13" FontWeight="SemiBold" Foreground="#F8FAFC"/>

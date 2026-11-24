@@ -16,6 +16,14 @@ internal sealed class Program
 
         try
         {
+            if (OperatingSystem.IsLinux() && args.Any(a => string.Equals(a, "--install", StringComparison.OrdinalIgnoreCase)))
+            {
+                var (ok, message) = LinuxInstallerHelper.InstallToLinuxDesktop();
+                Console.WriteLine(message);
+                Environment.ExitCode = ok ? 0 : 1;
+                return;
+            }
+
             using var instanceGuard = SingleInstanceGuard.TryAcquire();
             if (!instanceGuard.IsPrimaryInstance)
             {

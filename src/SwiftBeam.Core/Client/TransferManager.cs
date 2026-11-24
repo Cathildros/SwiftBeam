@@ -1,10 +1,19 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text.Json;
 using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Settings;
 
 namespace SwiftBeam.Core.Client;
+
+public sealed record PersistedTransferItem(
+    TransferDirection Direction,
+    string RemoteRelativePath,
+    string LocalDestinationPath,
+    long TotalBytes,
+    DateTime RemoteLastModifiedUtc,
+    int ChunkSize);
 
 public sealed record TransferTelemetrySnapshot(
     long TotalBytesQueued,
@@ -32,6 +41,7 @@ public sealed class TransferManager : IAsyncDisposable
     private int _maxConcurrency = 6;
     private int _chunkSizeBytes = 16 * 1024 * 1024;
     private bool _verifySha256 = true;
+    private bool _useSmartCompression;
     private FileConflictPolicy _conflictPolicy = FileConflictPolicy.SkipIdentical;
     private long _maxBytesPerSec; // 0 = Unlimited
     private readonly object _throttleLock = new();
@@ -65,6 +75,12 @@ public sealed class TransferManager : IAsyncDisposable
     {
         get => _verifySha256;
         set => _verifySha256 = value;
+    }
+
+    public bool UseSmartCompression
+    {
+        get => _useSmartCompression;
+        set => _useSmartCompression = value;
     }
 
     public FileConflictPolicy ConflictPolicy
@@ -715,7 +731,8 @@ public sealed class TransferManager : IAsyncDisposable
                         if (sw.ElapsedMilliseconds >= 250)
                             item.CurrentSpeedBytesPerSec = totalSent / sw.Elapsed.TotalSeconds;
                     },
-                    ct).ConfigureAwait(false);
+                    ct,
+                    allowCompression: _useSmartCompression).ConfigureAwait(false);
 
                 if (!ack.Success)
                     throw new InvalidOperationException(ack.Error ?? "Remote peer rejected uploaded chunk.");
@@ -744,7 +761,8 @@ public sealed class TransferManager : IAsyncDisposable
                         _speedSamples.Enqueue((Stopwatch.GetTimestamp(), n));
                         if (sw.ElapsedMilliseconds >= 250)
                             item.CurrentSpeedBytesPerSec = totalRead / sw.Elapsed.TotalSeconds;
-                    }).ConfigureAwait(false);
+                    },
+                    allowCompression: _useSmartCompression).ConfigureAwait(false);
 
                 if (!header.Success)
                     throw new InvalidOperationException(header.Error ?? "Remote peer refused file pull.");
@@ -1045,6 +1063,106 @@ public sealed class TransferManager : IAsyncDisposable
             idx++;
         }
         return idx == 0 ? $"{val:0} {units[idx]}" : $"{val:0.##} {units[idx]}";
+    }
+
+    public void SavePendingQueue(string filePath)
+    {
+        List<PersistedTransferItem> pending;
+        lock (_queueLock)
+        {
+            pending = _items
+                .Where(i => i.Status is TransferStatus.Queued or TransferStatus.Transferring or TransferStatus.Reconnecting
+                    or TransferStatus.Verifying or TransferStatus.Paused or TransferStatus.Failed)
+                .Select(i => new PersistedTransferItem(
+                    i.Direction,
+                    i.RemoteRelativePath,
+                    i.LocalDestinationPath,
+                    i.TotalBytes,
+                    i.RemoteLastModifiedUtc,
+                    i.ChunkSize))
+                .ToList();
+        }
+
+        try
+        {
+            if (pending.Count == 0)
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                return;
+            }
+
+            string? dir = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            string tmp = filePath + ".tmp";
+            string json = JsonSerializer.Serialize(pending);
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, filePath, overwrite: true);
+        }
+        catch { }
+    }
+
+    public int LoadPendingQueue(string filePath)
+    {
+        if (!File.Exists(filePath))
+            return 0;
+
+        List<PersistedTransferItem>? saved;
+        try
+        {
+            saved = JsonSerializer.Deserialize<List<PersistedTransferItem>>(File.ReadAllText(filePath));
+        }
+        catch
+        {
+            return 0;
+        }
+
+        if (saved is null || saved.Count == 0)
+            return 0;
+
+        var loaded = new List<TransferItem>();
+        lock (_queueLock)
+        {
+            foreach (var entry in saved)
+            {
+                if (entry.Direction == TransferDirection.Push && !File.Exists(entry.LocalDestinationPath))
+                    continue;
+
+                bool duplicate = _items.Any(x =>
+                    x.Direction == entry.Direction &&
+                    x.LocalDestinationPath.Equals(entry.LocalDestinationPath, StringComparison.OrdinalIgnoreCase));
+                if (duplicate) continue;
+
+                long size = entry.TotalBytes;
+                DateTime modUtc = entry.RemoteLastModifiedUtc;
+                if (entry.Direction == TransferDirection.Push)
+                {
+                    var fi = new FileInfo(entry.LocalDestinationPath);
+                    size = fi.Length;
+                    modUtc = fi.LastWriteTimeUtc;
+                }
+
+                int chunkSize = entry.ChunkSize >= 256 * 1024 ? entry.ChunkSize : ChunkSizeBytes;
+                var item = new TransferItem(
+                    entry.RemoteRelativePath,
+                    entry.LocalDestinationPath,
+                    size,
+                    modUtc,
+                    chunkSize,
+                    entry.Direction);
+                item.Pause();
+                item.StatusDetail = "Saved from previous session — connect & click Resume";
+
+                _items.Add(item);
+                loaded.Add(item);
+            }
+        }
+
+        foreach (var item in loaded)
+            ItemAdded?.Invoke(item);
+
+        return loaded.Count;
     }
 
     public async ValueTask DisposeAsync()

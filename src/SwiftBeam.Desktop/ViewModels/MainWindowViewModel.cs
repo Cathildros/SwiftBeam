@@ -9,6 +9,7 @@ using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Security;
 using SwiftBeam.Core.Server;
 using SwiftBeam.Core.Settings;
+using SwiftBeam.Core.SystemIntegration;
 using SwiftBeam.Core.Updates;
 
 namespace SwiftBeam.Desktop.ViewModels;
@@ -30,6 +31,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private readonly PeerDiscoveryService _discovery;
     private readonly TransferClient _browseClient = new();
     private readonly TransferManager _transferManager = new();
+    private readonly SleepInhibitor _sleepInhibitor = new();
     private readonly Dictionary<string, TransferItemViewModel> _transferMap = new();
 
     private readonly List<RemoteEntryViewModel> _allLocalEntries = [];
@@ -113,6 +115,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private bool _isCheckingForUpdates;
     private bool _isDownloadingUpdate;
     private double _updateDownloadProgress;
+
+    private string _shareTextInput = string.Empty;
+    private string _receivedTextSender = string.Empty;
+    private string _receivedTextContent = string.Empty;
+    private bool _hasReceivedText;
 
     public ObservableCollection<LocalInterfaceAddress> LocalInterfaces { get; } = [];
     public ObservableCollection<string> InstallerUrls { get; } = [];
@@ -293,6 +300,86 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
         }
     }
+
+    public bool HostReadOnlyShare
+    {
+        get => _settings.ReadOnlyShare;
+        set
+        {
+            if (_settings.ReadOnlyShare != value)
+            {
+                _settings.ReadOnlyShare = value;
+                _server.UpdateReadOnly(value);
+                _settings.Save();
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool HostRequireApproval
+    {
+        get => _settings.RequireHostApproval;
+        set
+        {
+            if (_settings.RequireHostApproval != value)
+            {
+                _settings.RequireHostApproval = value;
+                _server.UpdateRequireHostApproval(value);
+                _settings.Save();
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool UseSmartCompression
+    {
+        get => _settings.UseSmartCompression;
+        set
+        {
+            if (_settings.UseSmartCompression != value)
+            {
+                _settings.UseSmartCompression = value;
+                _transferManager.UseSmartCompression = value;
+                _settings.Save();
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool PreventSleepDuringTransfers
+    {
+        get => _settings.PreventSleepDuringTransfers;
+        set
+        {
+            if (_settings.PreventSleepDuringTransfers != value)
+            {
+                _settings.PreventSleepDuringTransfers = value;
+                if (!value)
+                    _sleepInhibitor.SetActive(false);
+                _settings.Save();
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool StartWithSystem
+    {
+        get => _settings.StartWithSystem;
+        set
+        {
+            if (_settings.StartWithSystem != value)
+            {
+                _settings.StartWithSystem = value;
+                bool ok = AutoStartHelper.TrySetAutoStart(value);
+                if (!ok)
+                    AppendLog("Could not update OS startup entry on this platform.");
+                _settings.Save();
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public bool IsLinuxPlatform => OperatingSystem.IsLinux();
 
     public bool IsServerRunning
     {
@@ -607,8 +694,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    // --- GitHub Auto-Update Properties ---
+    // --- GitHub Auto-Update & OS Hooks ---
     public Action? RequestAppShutdown { get; set; }
+    public Func<string, string, bool, Task<bool>>? HostApprovalPromptHandler { get; set; }
+    public Func<string, Task>? RequestClipboardCopy { get; set; }
     public string AppVersionText { get; } = $"v{GitHubUpdateService.GetCurrentVersion()}";
 
     public string UpdateRepo
@@ -739,6 +828,48 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _trayTooltipText, value);
     }
 
+    // --- Quick Text / Clipboard Share ---
+    public string ShareTextInput
+    {
+        get => _shareTextInput;
+        set
+        {
+            if (SetProperty(ref _shareTextInput, value))
+                SendSharedTextCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public bool HasReceivedText
+    {
+        get => _hasReceivedText;
+        private set => SetProperty(ref _hasReceivedText, value);
+    }
+
+    public string ReceivedTextSender
+    {
+        get => _receivedTextSender;
+        private set => SetProperty(ref _receivedTextSender, value);
+    }
+
+    public string ReceivedTextContent
+    {
+        get => _receivedTextContent;
+        private set
+        {
+            if (SetProperty(ref _receivedTextContent, value))
+                OnPropertyChanged(nameof(ReceivedTextPreview));
+        }
+    }
+
+    public string ReceivedTextPreview
+    {
+        get
+        {
+            string flat = _receivedTextContent.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            return flat.Length > 110 ? flat[..107] + "..." : flat;
+        }
+    }
+
     public bool ConnectUseTls
     {
         get => _connectUseTls;
@@ -782,6 +913,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             if (SetProperty(ref _isConnected, value))
             {
                 OnPropertyChanged(nameof(IsDisconnected));
+                OnPropertyChanged(nameof(IsRemoteReadOnly));
+                OnPropertyChanged(nameof(CanWriteRemote));
                 OnPropertyChanged(nameof(RemotePaneTitle));
                 OnPropertyChanged(nameof(ConnectedPeerSummary));
                 OnPropertyChanged(nameof(ConnectedPeerShortName));
@@ -789,6 +922,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(CanGoUpRemote));
                 PullSelectedCommand.RaiseCanExecuteChanged();
                 SendSelectedCommand.RaiseCanExecuteChanged();
+                SendSharedTextCommand.RaiseCanExecuteChanged();
                 RefreshRemoteCommand.RaiseCanExecuteChanged();
                 GoUpRemoteCommand.RaiseCanExecuteChanged();
             }
@@ -796,10 +930,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsDisconnected => !IsConnected;
+    public bool IsRemoteReadOnly => IsConnected && (_connectedPeer?.ReadOnly ?? false);
+    public bool CanWriteRemote => IsConnected && !IsRemoteReadOnly;
     public bool RemoteHasFullFs => IsConnected && (_connectedPeer?.FullFilesystemAccess ?? false);
 
     public string RemotePaneTitle => IsConnected && _connectedPeer is not null
-        ? $"Remote: {_connectedPeer.DeviceName} ({_connectedPeer.OsPlatform})"
+        ? $"Remote: {_connectedPeer.DeviceName} ({_connectedPeer.OsPlatform}){(IsRemoteReadOnly ? " (Read-Only)" : string.Empty)}"
         : "Remote computer";
 
     public string ConnectedPeerSummary => IsConnected && _connectedPeer is not null
@@ -1053,6 +1189,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public AsyncRelayCommand CheckForUpdatesCommand { get; }
     public AsyncRelayCommand InstallUpdateCommand { get; }
     public RelayCommand DismissUpdateBannerCommand { get; }
+    public AsyncRelayCommand SendSharedTextCommand { get; }
+    public RelayCommand DismissReceivedTextCommand { get; }
 
     public MainWindowViewModel()
     {
@@ -1070,11 +1208,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             AllowFullFilesystem = _settings.AllowFullFilesystemAccess,
             RequirePin = _settings.RequirePin,
             Pin = _settings.Pin,
-            AllowUnencrypted = _settings.AllowUnencryptedConnections
+            AllowUnencrypted = _settings.AllowUnencryptedConnections,
+            ReadOnly = _settings.ReadOnlyShare,
+            RequireHostApproval = _settings.RequireHostApproval
         };
 
         _server = new FileShareServer(serverOpts);
         _server.Log += AppendLog;
+        _server.ConnectionApprovalHandler = (name, ip, isWrite) =>
+            HostApprovalPromptHandler is not null
+                ? HostApprovalPromptHandler(name, ip, isWrite)
+                : Task.FromResult(true);
+        _server.TextReceived += OnServerTextReceived;
         _server.StatsChanged += (active, bytes) =>
         {
             Dispatcher.UIThread.Post(() =>
@@ -1112,6 +1257,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _transferManager.VerifySha256 = _settings.VerifySha256OnComplete;
         _transferManager.ConflictPolicy = _settings.ConflictPolicy;
         _transferManager.MaxSpeedMBps = _settings.MaxSpeedMBps;
+        _transferManager.UseSmartCompression = _settings.UseSmartCompression;
         _transferManager.Log += AppendLog;
         _transferManager.ItemAdded += OnTransferItemAdded;
         _transferManager.ItemUpdated += OnTransferItemUpdated;
@@ -1153,7 +1299,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         NavigateLocalInputCommand = new RelayCommand(() => LoadLocalDirectory(LocalPathInput));
         SelectAllLocalCommand = new RelayCommand(() => SetLocalSelectionAll(true));
         ClearLocalSelectionCommand = new RelayCommand(() => SetLocalSelectionAll(false));
-        SendSelectedCommand = new AsyncRelayCommand(SendSelectedToRemoteAsync, () => IsConnected);
+        SendSelectedCommand = new AsyncRelayCommand(SendSelectedToRemoteAsync, () => CanWriteRemote);
 
         // Remote pane commands
         RemoteDrivesCommand = new AsyncRelayCommand(() => LoadRemoteDirectoryAsync(FileShareServer.DrivesVirtualPath));
@@ -1183,17 +1329,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     Transfers.RemoveAt(i);
                 }
             }
+            SavePendingQueueSafe();
         });
         ClearAllTransfersCommand = new RelayCommand(() =>
         {
             _transferManager.ClearAll();
             _transferMap.Clear();
             Transfers.Clear();
+            SavePendingQueueSafe();
         });
         SaveSettingsCommand = new RelayCommand(() => { _settings.Save(); AppendLog("Settings saved."); });
         CheckForUpdatesCommand = new AsyncRelayCommand(() => CheckForUpdatesAsync(silentIfUpToDate: false), () => !IsCheckingForUpdates && !IsDownloadingUpdate);
         InstallUpdateCommand = new AsyncRelayCommand(InstallUpdateAsync, () => _pendingUpdate is not null && !IsDownloadingUpdate);
         DismissUpdateBannerCommand = new RelayCommand(() => HasAvailableUpdate = false);
+        SendSharedTextCommand = new AsyncRelayCommand(SendSharedTextAsync, () => IsConnected && !string.IsNullOrWhiteSpace(ShareTextInput));
+        DismissReceivedTextCommand = new RelayCommand(() => HasReceivedText = false);
         _updateStatusText = $"Current version {AppVersionText}";
 
         // Populate Local pane right away (Home folder, or Drives if Home is inaccessible)
@@ -1226,6 +1376,23 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
 
         AppendLog("SwiftBeam ready. Auto-discovering peers on Wi-Fi, Wired LAN, and Direct Ethernet cables.");
+
+        if (_settings.StartWithSystem)
+            AutoStartHelper.TrySetAutoStart(true);
+
+        try
+        {
+            int restoredCount = _transferManager.LoadPendingQueue(AppSettings.GetPendingQueueFilePath());
+            if (restoredCount > 0)
+            {
+                AppendLog($"Restored {restoredCount} unfinished transfer(s) as Paused from previous session.");
+                ShowToast($"Restored {restoredCount} paused transfer(s) — click Resume to continue");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Queue restore warning: {ex.Message}");
+        }
 
         if (_settings.AutoCheckUpdates)
         {
@@ -1901,6 +2068,32 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public RemoteEntryViewModel? GetFirstSelectedRemoteEntry() => _allRemoteEntries.FirstOrDefault(x => x.IsSelected);
     public int GetSelectedLocalCount() => _allLocalEntries.Count(x => x.IsSelected);
     public int GetSelectedRemoteCount() => _allRemoteEntries.Count(x => x.IsSelected);
+    public IReadOnlyList<string> GetSelectedLocalPaths() => _allLocalEntries.Where(x => x.IsSelected).Select(x => x.RelativePath).ToList();
+    public IReadOnlyList<RemoteEntry> GetSelectedRemoteEntries() => _allRemoteEntries.Where(x => x.IsSelected).Select(x => x.Entry).ToList();
+
+    public void SelectRangeLocal(RemoteEntryViewModel anchor, RemoteEntryViewModel target, bool value)
+    {
+        int i1 = FilteredLocalEntries.IndexOf(anchor);
+        int i2 = FilteredLocalEntries.IndexOf(target);
+        if (i1 < 0 || i2 < 0) return;
+        int start = Math.Min(i1, i2);
+        int end = Math.Max(i1, i2);
+        for (int i = start; i <= end; i++)
+            FilteredLocalEntries[i].IsSelected = value;
+        UpdateLocalSelectionCount();
+    }
+
+    public void SelectRangeRemote(RemoteEntryViewModel anchor, RemoteEntryViewModel target, bool value)
+    {
+        int i1 = FilteredRemoteEntries.IndexOf(anchor);
+        int i2 = FilteredRemoteEntries.IndexOf(target);
+        if (i1 < 0 || i2 < 0) return;
+        int start = Math.Min(i1, i2);
+        int end = Math.Max(i1, i2);
+        for (int i = start; i <= end; i++)
+            FilteredRemoteEntries[i].IsSelected = value;
+        UpdateRemoteSelectionCount();
+    }
 
     public void CreateLocalFolder(string folderName)
     {
@@ -1989,33 +2182,76 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await LoadRemoteDirectoryAsync(RemotePath);
     }
 
-    public async Task SendDroppedLocalPathsAsync(IEnumerable<string> localPaths)
+    public Task SendDroppedLocalPathsAsync(IEnumerable<string> localPaths) =>
+        SendLocalPathsToRemoteAsync(localPaths, isDrop: true);
+
+    public async Task SendLocalPathsToRemoteAsync(IEnumerable<string> localPaths, bool isDrop = false)
     {
         if (!IsConnected)
         {
-            ConnectionError = "Connect to a remote computer first before dropping files to send.";
+            ConnectionError = "Connect to a remote computer first before sending files.";
+            return;
+        }
+        if (IsRemoteReadOnly)
+        {
+            ConnectionError = "Remote share is Read-Only; uploads are disabled by the host.";
             return;
         }
         if (RemotePath == FileShareServer.DrivesVirtualPath)
         {
-            ConnectionError = "Open a folder on the Remote computer (e.g. Downloads or Desktop) before dropping files.";
+            ConnectionError = "Open a folder on the Remote computer (e.g. Downloads or Desktop) before sending files.";
             return;
         }
+
+        var pathList = localPaths.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+        if (pathList.Count == 0)
+            return;
 
         ConnectionError = string.Empty;
         try
         {
-            var added = await _transferManager.EnqueuePushPathsAsync(_browseClient, localPaths, RemotePath);
+            var added = await _transferManager.EnqueuePushPathsAsync(_browseClient, pathList, RemotePath);
             if (added.Count > 0)
             {
-                AppendLog($"Dropped {added.Count} file(s) → sending to {RemotePathInput} ({ParallelWorkers} parallel streams).");
-                ShowToast($"Queued {added.Count} dropped file(s) to send");
+                string verb = isDrop ? "Dropped" : "Queued";
+                AppendLog($"{verb} {added.Count} file(s) → sending to {RemotePathInput} ({ParallelWorkers} parallel streams).");
+                ShowToast($"Queued {added.Count} file(s) to send");
+                SavePendingQueueSafe();
             }
         }
         catch (Exception ex)
         {
-            ConnectionError = $"Drop send failed: {ex.Message}";
-            AppendLog($"Drop send error: {ex.Message}");
+            ConnectionError = $"Send failed: {ex.Message}";
+            AppendLog($"Send error: {ex.Message}");
+        }
+    }
+
+    public async Task PullEntriesToLocalAsync(IReadOnlyList<RemoteEntry> entries)
+    {
+        if (!IsConnected || entries.Count == 0)
+            return;
+
+        string destFolder = (!string.IsNullOrEmpty(LocalPath) && LocalPath != FileShareServer.DrivesVirtualPath && Directory.Exists(LocalPath))
+            ? LocalPath
+            : DownloadDirectory;
+
+        ConnectionError = string.Empty;
+        try
+        {
+            Directory.CreateDirectory(destFolder);
+            string baseRemote = RemotePath == FileShareServer.DrivesVirtualPath ? string.Empty : RemotePath;
+            var added = await _transferManager.EnqueueEntriesAsync(_browseClient, entries, destFolder, baseRemote);
+            if (added.Count > 0)
+            {
+                AppendLog($"Pulling {added.Count} file(s) into {destFolder} ({ParallelWorkers} parallel streams).");
+                ShowToast($"Queued {added.Count} file(s) to pull");
+                SavePendingQueueSafe();
+            }
+        }
+        catch (Exception ex)
+        {
+            ConnectionError = $"Pull failed: {ex.Message}";
+            AppendLog($"Pull error: {ex.Message}");
         }
     }
 
@@ -2068,25 +2304,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        // Download directly into the currently open Local folder (or default DownloadDirectory if on Drives list)
-        string destFolder = (!string.IsNullOrEmpty(LocalPath) && LocalPath != FileShareServer.DrivesVirtualPath && Directory.Exists(LocalPath))
-            ? LocalPath
-            : DownloadDirectory;
-
-        ConnectionError = string.Empty;
-        try
-        {
-            Directory.CreateDirectory(destFolder);
-            string baseRemote = RemotePath == FileShareServer.DrivesVirtualPath ? string.Empty : RemotePath;
-            var added = await _transferManager.EnqueueEntriesAsync(_browseClient, selected, destFolder, baseRemote);
-            AppendLog($"Pulling {added.Count} file(s) into {destFolder} ({ParallelWorkers} parallel streams).");
-            SetRemoteSelectionAll(false);
-        }
-        catch (Exception ex)
-        {
-            ConnectionError = $"Pull failed: {ex.Message}";
-            AppendLog($"Pull error: {ex.Message}");
-        }
+        await PullEntriesToLocalAsync(selected);
+        SetRemoteSelectionAll(false);
     }
 
     private async Task SendSelectedToRemoteAsync()
@@ -2099,23 +2318,57 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        if (RemotePath == FileShareServer.DrivesVirtualPath)
-        {
-            ConnectionError = "Open a folder on the Remote computer first (e.g. Desktop or Downloads) before sending files.";
-            return;
-        }
+        await SendLocalPathsToRemoteAsync(selected, isDrop: false);
+        if (string.IsNullOrEmpty(ConnectionError))
+            SetLocalSelectionAll(false);
+    }
 
-        ConnectionError = string.Empty;
+    private async Task SendSharedTextAsync()
+    {
+        string text = ShareTextInput;
+        if (!IsConnected || string.IsNullOrWhiteSpace(text))
+            return;
+
         try
         {
-            var added = await _transferManager.EnqueuePushPathsAsync(_browseClient, selected, RemotePath);
-            AppendLog($"Sending {added.Count} file(s) to {RemotePathInput} ({ParallelWorkers} parallel streams).");
-            SetLocalSelectionAll(false);
+            var ack = await _browseClient.SendTextAsync(text, _settings.DeviceName);
+            if (!ack.Success)
+            {
+                ConnectionError = ack.Error ?? "Could not deliver text snippet.";
+                return;
+            }
+            ShareTextInput = string.Empty;
+            AppendLog($"Sent text snippet ({text.Length} chars) to {_connectedPeer?.DeviceName ?? "peer"}.");
+            ShowToast("Text snippet sent");
         }
         catch (Exception ex)
         {
-            ConnectionError = $"Send failed: {ex.Message}";
-            AppendLog($"Send error: {ex.Message}");
+            ConnectionError = $"Text send failed: {ex.Message}";
+            AppendLog($"Text send error: {ex.Message}");
+        }
+    }
+
+    private void OnServerTextReceived(string senderName, string text)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            ReceivedTextSender = string.IsNullOrWhiteSpace(senderName) ? "Remote Peer" : senderName;
+            ReceivedTextContent = text;
+            HasReceivedText = true;
+            AppendLog($"Received text snippet from {ReceivedTextSender} ({text.Length} chars).");
+            ShowToast($"Text received from {ReceivedTextSender}");
+        });
+    }
+
+    private void SavePendingQueueSafe()
+    {
+        try
+        {
+            _transferManager.SavePendingQueue(AppSettings.GetPendingQueueFilePath());
+        }
+        catch
+        {
+            // Ignore transient persistence write issues
         }
     }
 
@@ -2231,6 +2484,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             _prevActiveTransferCount = snap.QueuedOrActiveFiles;
             _prevCompletedTransferCount = snap.CompletedFiles;
+
+            _sleepInhibitor.SetActive(PreventSleepDuringTransfers && snap.QueuedOrActiveFiles > 0);
 
             foreach (var vm in Transfers)
             {
@@ -2348,6 +2603,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        SavePendingQueueSafe();
+        _sleepInhibitor.Dispose();
         await _transferManager.DisposeAsync();
         await _browseClient.DisposeAsync();
         await _discovery.DisposeAsync();

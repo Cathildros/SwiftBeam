@@ -190,6 +190,7 @@ public sealed class TransferItemViewModel : ObservableObject
     private bool _canPause;
     private bool _canResume;
     private bool _canCancel;
+    private bool _canOpenFolder;
     private IBrush _statusBrush = Brushes.LightSlateGray;
 
     private static readonly IBrush BrushBlue = SolidColorBrush.Parse("#A78BFA");
@@ -256,6 +257,12 @@ public sealed class TransferItemViewModel : ObservableObject
         private set => SetProperty(ref _canCancel, value);
     }
 
+    public bool CanOpenFolder
+    {
+        get => _canOpenFolder;
+        private set => SetProperty(ref _canOpenFolder, value);
+    }
+
     public IBrush StatusBrush
     {
         get => _statusBrush;
@@ -295,6 +302,7 @@ public sealed class TransferItemViewModel : ObservableObject
         CanPause = Model.Status is TransferStatus.Queued or TransferStatus.Transferring or TransferStatus.Reconnecting;
         CanResume = Model.Status is TransferStatus.Paused or TransferStatus.Failed;
         CanCancel = Model.Status is not (TransferStatus.Completed or TransferStatus.Skipped or TransferStatus.Cancelled);
+        CanOpenFolder = Model.Direction == TransferDirection.Pull && Model.Status is TransferStatus.Completed or TransferStatus.Skipped;
 
         StatusBrush = Model.Status switch
         {

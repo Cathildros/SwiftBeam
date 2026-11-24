@@ -27,6 +27,9 @@ public enum FrameType : byte
     PushChunkAck = 0x25,
     PushFinalizeRequest = 0x26,
     PushFinalizeAck = 0x27,
+    SendTextRequest = 0x28,
+    SendTextAck = 0x29,
+    CompressedDataChunk = 0x2A,
 
     Ping = 0x30,
     Pong = 0x31,
@@ -72,7 +75,8 @@ public sealed record AuthResultMessage(
     string? HomePath = null,
     string? DesktopPath = null,
     string? DownloadsPath = null,
-    string? DocumentsPath = null);
+    string? DocumentsPath = null,
+    bool ReadOnly = false);
 
 public sealed record CreateDirRequestMessage(string RelativePath);
 
@@ -91,7 +95,8 @@ public sealed record PushChunkRequestMessage(
     long TotalFileSize,
     long Offset,
     long Length,
-    DateTime LastModifiedUtc);
+    DateTime LastModifiedUtc,
+    bool AllowCompression = false);
 
 public sealed record PushChunkAckMessage(
     bool Success,
@@ -137,7 +142,8 @@ public sealed record FileInfoResponseMessage(
 public sealed record PullRangeRequestMessage(
     string RelativePath,
     long Offset,
-    long Length);
+    long Length,
+    bool AllowCompression = false);
 
 public sealed record PullRangeHeaderMessage(
     bool Success,
@@ -145,6 +151,14 @@ public sealed record PullRangeHeaderMessage(
     DateTime LastModifiedUtc,
     long Offset,
     long Length,
+    string? Error = null);
+
+public sealed record SendTextRequestMessage(
+    string Text,
+    string SenderName);
+
+public sealed record SendTextAckMessage(
+    bool Success,
     string? Error = null);
 
 public sealed record ErrorMessage(string Message);

@@ -33,6 +33,8 @@ public sealed class FileShareServerOptions
     public bool RequirePin { get; set; } = true;
     public string Pin { get; set; } = PinAuth.GeneratePin();
     public bool AllowUnencrypted { get; set; } = true;
+    public bool ReadOnly { get; set; } = false;
+    public bool RequireHostApproval { get; set; } = false;
 }
 
 public sealed class FileShareServer : IAsyncDisposable
@@ -101,6 +103,7 @@ public sealed class FileShareServer : IAsyncDisposable
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _pullFileLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ClientSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PeerRateState> _peerRates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Lazy<Task<bool>>> _approvedPeers = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _activityEmitLock = new();
 
     private TcpListener? _listener;
@@ -122,6 +125,8 @@ public sealed class FileShareServer : IAsyncDisposable
     public event Action<string>? Log;
     public event Action<int, long>? StatsChanged;
     public event Action<IReadOnlyList<IncomingPeerActivity>>? IncomingActivityChanged;
+    public event Action<string, string>? TextReceived;
+    public Func<string, string, bool, Task<bool>>? ConnectionApprovalHandler { get; set; }
 
     public FileShareServer(FileShareServerOptions options)
     {
@@ -155,6 +160,21 @@ public sealed class FileShareServer : IAsyncDisposable
     public void UpdateAllowUnencrypted(bool allowUnencrypted)
     {
         _options.AllowUnencrypted = allowUnencrypted;
+    }
+
+    public void UpdateReadOnly(bool readOnly)
+    {
+        _options.ReadOnly = readOnly;
+        Log?.Invoke(readOnly
+            ? "Access mode updated: Read-Only (downloads allowed, uploads/edits blocked)."
+            : "Access mode updated: Read & Write enabled.");
+    }
+
+    public void UpdateRequireHostApproval(bool requireApproval)
+    {
+        _options.RequireHostApproval = requireApproval;
+        if (requireApproval)
+            _approvedPeers.Clear();
     }
 
     public void Start()
@@ -229,6 +249,7 @@ public sealed class FileShareServer : IAsyncDisposable
 
     public Task DisconnectIncomingClientsAsync()
     {
+        _approvedPeers.Clear();
         foreach (var kv in _sessions)
         {
             try { kv.Value.SessionCts.Cancel(); } catch { }
@@ -341,6 +362,7 @@ public sealed class FileShareServer : IAsyncDisposable
             try { await _reaperLoop.ConfigureAwait(false); } catch { }
         }
         _listener = null;
+        _approvedPeers.Clear();
         _cts.Dispose();
         _cts = null;
         Log?.Invoke("Server stopped.");
@@ -455,6 +477,27 @@ public sealed class FileShareServer : IAsyncDisposable
                     }
                 }
 
+                string clientLabel = string.IsNullOrWhiteSpace(authResp.ClientName) ? remoteIpOnly : authResp.ClientName;
+                if (_options.RequireHostApproval && ConnectionApprovalHandler is not null)
+                {
+                    string approvalKey = $"{clientLabel}|{remoteIpOnly}";
+                    var approvalLazy = _approvedPeers.GetOrAdd(approvalKey, _ =>
+                        new Lazy<Task<bool>>(() => RequestApprovalWithTimeoutAsync(clientLabel, remoteIpOnly, useTls), LazyThreadSafetyMode.ExecutionAndPublication));
+
+                    bool approved = await approvalLazy.Value.ConfigureAwait(false);
+                    if (!approved)
+                    {
+                        _approvedPeers.TryRemove(approvalKey, out _);
+                        await FrameProtocol.WriteJsonFrameAsync(
+                            activeStream,
+                            FrameType.AuthResult,
+                            new AuthResultMessage(false, "Connection declined by host.", null),
+                            ct).ConfigureAwait(false);
+                        Log?.Invoke($"Declined connection from {clientLabel} ({remoteDesc})");
+                        return;
+                    }
+                }
+
                 string rootName = _options.AllowFullFilesystem
                     ? _options.DeviceName
                     : Path.GetFileName(_options.SharedDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -467,10 +510,9 @@ public sealed class FileShareServer : IAsyncDisposable
                 await FrameProtocol.WriteJsonFrameAsync(
                     activeStream,
                     FrameType.AuthResult,
-                    new AuthResultMessage(true, null, rootName, _options.AllowFullFilesystem, home, desktop, downloads, documents),
+                    new AuthResultMessage(true, null, rootName, _options.AllowFullFilesystem, home, desktop, downloads, documents, _options.ReadOnly),
                     ct).ConfigureAwait(false);
 
-                string clientLabel = string.IsNullOrWhiteSpace(authResp.ClientName) ? remoteIpOnly : authResp.ClientName;
                 session = new ClientSession(clientLabel, remoteIpOnly, useTls);
                 _sessions[session.SessionId] = session;
 
@@ -587,6 +629,25 @@ public sealed class FileShareServer : IAsyncDisposable
                     var req = FrameProtocol.DeserializePayload<PushFinalizeRequestMessage>(frame.Value.Payload);
                     var resp = await HandlePushFinalizeAsync(req, ct).ConfigureAwait(false);
                     await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PushFinalizeAck, resp, ct).ConfigureAwait(false);
+                    break;
+                }
+
+                case FrameType.SendTextRequest:
+                {
+                    var req = FrameProtocol.DeserializePayload<SendTextRequestMessage>(frame.Value.Payload);
+                    if (string.IsNullOrEmpty(req.Text) || System.Text.Encoding.UTF8.GetByteCount(req.Text) > 256 * 1024)
+                    {
+                        await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.SendTextAck,
+                            new SendTextAckMessage(false, "Text message is empty or exceeds 256 KB limit."), ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        string sender = string.IsNullOrWhiteSpace(req.SenderName) ? session.ClientName : req.SenderName;
+                        Log?.Invoke($"Received text snippet from {sender} ({req.Text.Length} chars)");
+                        TextReceived?.Invoke(sender, req.Text);
+                        await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.SendTextAck,
+                            new SendTextAckMessage(true), ct).ConfigureAwait(false);
+                    }
                     break;
                 }
 
@@ -844,8 +905,28 @@ public sealed class FileShareServer : IAsyncDisposable
         return entries;
     }
 
+    private async Task<bool> RequestApprovalWithTimeoutAsync(string clientName, string remoteAddr, bool tlsActive)
+    {
+        var handler = ConnectionApprovalHandler;
+        if (handler is null) return true;
+        try
+        {
+            var promptTask = handler(clientName, remoteAddr, tlsActive);
+            var completed = await Task.WhenAny(promptTask, Task.Delay(TimeSpan.FromSeconds(60))).ConfigureAwait(false);
+            if (completed != promptTask)
+                return false;
+            return await promptTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private CreateDirResponseMessage HandleCreateDir(CreateDirRequestMessage req)
     {
+        if (_options.ReadOnly)
+            return new CreateDirResponseMessage(false, "Host is in Read-Only mode.");
         if (!TryResolveSafePath(req.RelativePath, out string fullPath, out _) || fullPath == DrivesVirtualPath)
             return new CreateDirResponseMessage(false, "Invalid directory path.");
 
@@ -862,6 +943,8 @@ public sealed class FileShareServer : IAsyncDisposable
 
     private DeletePathResponseMessage HandleDeletePath(DeletePathRequestMessage req)
     {
+        if (_options.ReadOnly)
+            return new DeletePathResponseMessage(false, "Host is in Read-Only mode.");
         if (!TryResolveSafePath(req.RelativePath, out string fullPath, out _) || fullPath == DrivesVirtualPath)
             return new DeletePathResponseMessage(false, "Invalid path.");
 
@@ -900,6 +983,8 @@ public sealed class FileShareServer : IAsyncDisposable
 
     private RenamePathResponseMessage HandleRenamePath(RenamePathRequestMessage req)
     {
+        if (_options.ReadOnly)
+            return new RenamePathResponseMessage(false, null, "Host is in Read-Only mode.");
         if (!TryResolveSafePath(req.RelativePath, out string fullPath, out _) || fullPath == DrivesVirtualPath)
             return new RenamePathResponseMessage(false, null, "Invalid path.");
 
@@ -1051,10 +1136,14 @@ public sealed class FileShareServer : IAsyncDisposable
 
             if (requestedLen > 0)
             {
+                bool allowCompress = req.AllowCompression && CompressionHelper.ShouldCompressFile(fullPath);
                 var handle = await GetOrOpenPullHandleAsync(fullPath, fileSize, lastWriteTicks, ct).ConfigureAwait(false);
                 int frameBufSize = 5 + ProtocolConstants.DataFrameChunkBytes;
+                int compBufSize = 9 + ProtocolConstants.DataFrameChunkBytes;
                 byte[] bufA = ArrayPool<byte>.Shared.Rent(frameBufSize);
                 byte[] bufB = ArrayPool<byte>.Shared.Rent(frameBufSize);
+                byte[]? compA = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
+                byte[]? compB = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
                 Task? pendingSend = null;
                 try
                 {
@@ -1065,6 +1154,7 @@ public sealed class FileShareServer : IAsyncDisposable
                     while (remaining > 0)
                     {
                         byte[] curBuf = useA ? bufA : bufB;
+                        byte[]? curComp = useA ? compA : compB;
                         int toRead = (int)Math.Min(remaining, ProtocolConstants.DataFrameChunkBytes);
                         int read = await RandomAccess.ReadAsync(handle, curBuf.AsMemory(5, toRead), pos, ct).ConfigureAwait(false);
                         if (read == 0) break;
@@ -1073,7 +1163,14 @@ public sealed class FileShareServer : IAsyncDisposable
                         if (pendingSend is not null)
                             await pendingSend.ConfigureAwait(false);
 
-                        pendingSend = FrameProtocol.WritePreframedDataAsync(stream, curBuf, read, ct).AsTask();
+                        if (curComp is not null && CompressionHelper.TryCompressPreframed(curBuf.AsSpan(5, read), curComp, out int compPacketBytes))
+                        {
+                            pendingSend = stream.WriteAsync(curComp.AsMemory(0, compPacketBytes), ct).AsTask();
+                        }
+                        else
+                        {
+                            pendingSend = FrameProtocol.WritePreframedDataAsync(stream, curBuf, read, ct).AsTask();
+                        }
                         pos += read;
                         remaining -= read;
                         useA = !useA;
@@ -1092,6 +1189,8 @@ public sealed class FileShareServer : IAsyncDisposable
                     }
                     ArrayPool<byte>.Shared.Return(bufA);
                     ArrayPool<byte>.Shared.Return(bufB);
+                    if (compA is not null) ArrayPool<byte>.Shared.Return(compA);
+                    if (compB is not null) ArrayPool<byte>.Shared.Return(compB);
                 }
             }
 
@@ -1106,6 +1205,13 @@ public sealed class FileShareServer : IAsyncDisposable
 
     private async Task HandlePushChunkAsync(Stream stream, PushChunkRequestMessage req, ClientSession session, CancellationToken ct)
     {
+        if (_options.ReadOnly)
+        {
+            await DrainUntilDataEndAsync(stream, ct).ConfigureAwait(false);
+            await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PushChunkAck, new PushChunkAckMessage(false, "Host is in Read-Only mode."), ct).ConfigureAwait(false);
+            return;
+        }
+
         if (!TryResolveSafePath(req.RelativePath, out string fullPath, out _) || fullPath == DrivesVirtualPath)
         {
             await DrainUntilDataEndAsync(stream, ct).ConfigureAwait(false);
@@ -1149,6 +1255,7 @@ public sealed class FileShareServer : IAsyncDisposable
 
             byte[] bufA = ArrayPool<byte>.Shared.Rent(ProtocolConstants.DataFrameChunkBytes);
             byte[] bufB = ArrayPool<byte>.Shared.Rent(ProtocolConstants.DataFrameChunkBytes);
+            byte[] compBuf = ArrayPool<byte>.Shared.Rent(ProtocolConstants.DataFrameChunkBytes + 1024);
             Task? pendingDiskWrite = null;
             try
             {
@@ -1163,6 +1270,29 @@ public sealed class FileShareServer : IAsyncDisposable
 
                     if (frameHeader.Type == FrameType.DataEnd)
                         break;
+
+                    if (frameHeader.Type == FrameType.CompressedDataChunk)
+                    {
+                        if (frameHeader.Length > compBuf.Length)
+                        {
+                            ArrayPool<byte>.Shared.Return(compBuf);
+                            compBuf = ArrayPool<byte>.Shared.Rent(frameHeader.Length);
+                        }
+                        await FrameProtocol.ReadExactAsync(stream, compBuf.AsMemory(0, frameHeader.Length), ct).ConfigureAwait(false);
+                        byte[] curBuf = useA ? bufA : bufB;
+                        int rawLen = CompressionHelper.DecompressFramePayload(compBuf.AsSpan(0, frameHeader.Length), curBuf.AsSpan(0, ProtocolConstants.DataFrameChunkBytes));
+
+                        if (pendingDiskWrite is not null)
+                            await pendingDiskWrite.ConfigureAwait(false);
+
+                        long targetOffset = writePos;
+                        pendingDiskWrite = RandomAccess.WriteAsync(handle, curBuf.AsMemory(0, rawLen), targetOffset, ct).AsTask();
+                        writePos += rawLen;
+                        received += rawLen;
+                        useA = !useA;
+                        RecordTransferredBytes(session, rawLen);
+                        continue;
+                    }
 
                     if (frameHeader.Type != FrameType.DataChunk)
                         throw new InvalidDataException($"Expected DataChunk during push, got {frameHeader.Type}.");
@@ -1206,6 +1336,7 @@ public sealed class FileShareServer : IAsyncDisposable
                 }
                 ArrayPool<byte>.Shared.Return(bufA);
                 ArrayPool<byte>.Shared.Return(bufB);
+                ArrayPool<byte>.Shared.Return(compBuf);
             }
 
             await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PushChunkAck, new PushChunkAckMessage(true), ct).ConfigureAwait(false);
@@ -1242,6 +1373,8 @@ public sealed class FileShareServer : IAsyncDisposable
 
     private async Task<PushFinalizeAckMessage> HandlePushFinalizeAsync(PushFinalizeRequestMessage req, CancellationToken ct)
     {
+        if (_options.ReadOnly)
+            return new PushFinalizeAckMessage(false, "Host is in Read-Only mode.");
         if (!TryResolveSafePath(req.RelativePath, out string fullPath, out _) || fullPath == DrivesVirtualPath)
             return new PushFinalizeAckMessage(false, "Invalid target path.");
 

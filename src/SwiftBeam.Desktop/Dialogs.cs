@@ -80,15 +80,15 @@ public static class InputDialog
         return string.IsNullOrWhiteSpace(result) ? null : result;
     }
 
-    public static async Task<bool> ShowConfirmAsync(Window owner, string title, string message, string confirmLabel = "Delete")
+    public static async Task<bool> ShowConfirmAsync(Window owner, string title, string message, string confirmLabel = "Delete", bool isPrimaryConfirm = false, string cancelLabel = "Cancel")
     {
         bool confirmed = false;
 
         var dialog = new Window
         {
             Title = title,
-            Width = 410,
-            Height = 155,
+            Width = 430,
+            SizeToContent = SizeToContent.Height,
             CanResize = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = SolidColorBrush.Parse("#0F172A"),
@@ -98,14 +98,14 @@ public static class InputDialog
         var yesBtn = new Button
         {
             Content = confirmLabel,
-            Classes = { "danger" },
+            Classes = { isPrimaryConfirm ? "primary" : "danger" },
             Padding = new Thickness(18, 6),
             MinWidth = 86,
             HorizontalContentAlignment = HorizontalAlignment.Center
         };
         var noBtn = new Button
         {
-            Content = "Cancel",
+            Content = cancelLabel,
             Classes = { "subtle" },
             Padding = new Thickness(14, 6),
             MinWidth = 80,
