@@ -1089,6 +1089,11 @@ public sealed class FileShareServer : IAsyncDisposable
             Directory.CreateDirectory(fullPath);
             return new CreateDirResponseMessage(true);
         }
+        catch (UnauthorizedAccessException)
+        {
+            return new CreateDirResponseMessage(false,
+                $"Access denied creating folder '{Path.GetFileName(fullPath)}'. Writing into protected folders like Program Files requires running SwiftBeam as Administrator, or choose a user folder like Desktop/Downloads.");
+        }
         catch (Exception ex)
         {
             return new CreateDirResponseMessage(false, ex.Message);
@@ -1531,6 +1536,7 @@ public sealed class FileShareServer : IAsyncDisposable
         string partPath = fullPath + ".sbpart";
         _pushStartTicks.TryAdd(partPath, Stopwatch.GetTimestamp());
         var fileLock = _pushFileLocks.GetOrAdd(partPath, _ => new SemaphoreSlim(1, 1));
+        bool dataEndRead = false;
 
         try
         {
@@ -1579,7 +1585,10 @@ public sealed class FileShareServer : IAsyncDisposable
                         ?? throw new EndOfStreamException("Connection closed during push chunk.");
 
                     if (frameHeader.Type == FrameType.DataEnd)
+                    {
+                        dataEndRead = true;
                         break;
+                    }
 
                     if (frameHeader.Type == FrameType.CompressedDataChunk)
                     {
@@ -1653,7 +1662,14 @@ public sealed class FileShareServer : IAsyncDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not IOException and not EndOfStreamException)
         {
-            await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PushChunkAck, new PushChunkAckMessage(false, ex.Message), ct).ConfigureAwait(false);
+            if (!dataEndRead)
+                await DrainUntilDataEndAsync(stream, ct).ConfigureAwait(false);
+
+            string errMsg = ex is UnauthorizedAccessException
+                ? $"Access denied writing '{Path.GetFileName(fullPath)}'. Writing into protected folders like Program Files requires running SwiftBeam as Administrator, or choose a user folder like Desktop/Downloads."
+                : ex.Message;
+
+            await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PushChunkAck, new PushChunkAckMessage(false, errMsg), ct).ConfigureAwait(false);
         }
     }
 

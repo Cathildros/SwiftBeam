@@ -1737,6 +1737,42 @@ public sealed class TransferEngineTests : IDisposable
                 MutualAuthToken: revToken)));
     }
 
+    [Fact]
+    public async Task PushChunk_WhenServerHitsAccessDenied_DrainsDataFramesAndKeepsConnectionInSync()
+    {
+        // Creating a directory at 'blocked.txt.sbpart' forces File.OpenHandle to throw UnauthorizedAccessException on both Windows & Linux
+        string blockingPartDir = Path.Combine(_shareDir, "blocked.txt.sbpart");
+        Directory.CreateDirectory(blockingPartDir);
+
+        string srcFile = Path.Combine(_rootTemp, "payload.bin");
+        byte[] payload = new byte[128 * 1024];
+        Random.Shared.NextBytes(payload);
+        await File.WriteAllBytesAsync(srcFile, payload);
+
+        await using var server = CreateServer(pin: "555555", requirePin: true, allowUnencrypted: true);
+        server.Start();
+
+        await using var client = new TransferClient();
+        await client.ConnectAsync(new ConnectionTarget("127.0.0.1", server.ListeningPort, "555555", true, "SyncTester"));
+
+        // 1. Failing push must return PushChunkAck(Success = false) and drain all DataChunk/DataEnd frames
+        var failAck = await client.PushRangeAsync("blocked.txt", srcFile, payload.Length, DateTime.UtcNow, 0, payload.Length, _ => { });
+        Assert.False(failAck.Success);
+        Assert.Contains("Access denied", failAck.Error);
+
+        // 2. Same connection must remain 100% synchronized (no "Unsupported frame type DataChunk")
+        Assert.True(await client.PingAsync());
+        var listing = await client.ListDirectoryAsync("");
+        Assert.Null(listing.Error);
+
+        // 3. Subsequent upload on the exact same TCP connection must succeed cleanly
+        var okAck = await client.PushRangeAsync("allowed.bin", srcFile, payload.Length, DateTime.UtcNow, 0, payload.Length, _ => { });
+        Assert.True(okAck.Success, okAck.Error);
+        var finAck = await client.FinalizePushAsync("allowed.bin", payload.Length, DateTime.UtcNow, null);
+        Assert.True(finAck.Success, finAck.Error);
+        Assert.Equal(payload, await File.ReadAllBytesAsync(Path.Combine(_shareDir, "allowed.bin")));
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }

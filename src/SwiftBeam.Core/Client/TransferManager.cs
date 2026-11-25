@@ -241,7 +241,9 @@ public sealed class TransferManager : IAsyncDisposable
             {
                 string folderName = Path.GetFileName(localPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 string remoteDirRoot = CombineRemote(remoteBase, folderName);
-                await browseClient.CreateDirectoryAsync(remoteDirRoot, ct).ConfigureAwait(false);
+                var mkRootResp = await browseClient.CreateDirectoryAsync(remoteDirRoot, ct).ConfigureAwait(false);
+                if (!mkRootResp.Success)
+                    throw new IOException(mkRootResp.Error ?? $"Could not create remote folder '{remoteDirRoot}'.");
 
                 var stack = new Stack<DirectoryInfo>();
                 stack.Push(new DirectoryInfo(localPath));
@@ -259,7 +261,9 @@ public sealed class TransferManager : IAsyncDisposable
                         string remoteEntryPath = CombineRemote(remoteDirRoot, rel);
                         if (entry is DirectoryInfo subDir)
                         {
-                            await browseClient.CreateDirectoryAsync(remoteEntryPath, ct).ConfigureAwait(false);
+                            var mkSubResp = await browseClient.CreateDirectoryAsync(remoteEntryPath, ct).ConfigureAwait(false);
+                            if (!mkSubResp.Success)
+                                throw new IOException(mkSubResp.Error ?? $"Could not create remote subfolder '{remoteEntryPath}'.");
                             stack.Push(subDir);
                         }
                         else if (entry is FileInfo fi)
@@ -696,6 +700,8 @@ public sealed class TransferManager : IAsyncDisposable
             }
             catch (Exception ex)
             {
+                if (ex is InvalidDataException)
+                    await client.DisconnectAsync().ConfigureAwait(false);
                 if (!isFinalizeOnly)
                     item.ReleaseChunkOnFailure(chunkIndex, 0, markReconnecting: false, null);
                 else

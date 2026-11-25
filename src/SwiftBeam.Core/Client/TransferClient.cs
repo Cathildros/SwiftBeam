@@ -251,71 +251,90 @@ public sealed class TransferClient : IAsyncDisposable
         {
             var stream = EnsureStream();
             bool allowCompress = allowCompression && CompressionHelper.ShouldCompressFile(localSourcePath);
-            await FrameProtocol.WriteJsonFrameAsync(
-                stream,
-                FrameType.PushChunkRequest,
-                new PushChunkRequestMessage(remoteRelativePath, totalFileSize, offset, length, lastModifiedUtc, allowCompress),
-                ct).ConfigureAwait(false);
 
-            if (length > 0)
+            // Open local handle BEFORE sending PushChunkRequest so any local file/permission error fails before putting frames on the wire
+            using var handle = length > 0
+                ? File.OpenHandle(localSourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.Asynchronous | FileOptions.SequentialScan)
+                : null;
+
+            bool headerSent = false;
+            bool ackReceived = false;
+            try
             {
-                using var handle = File.OpenHandle(localSourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                int frameBufSize = 5 + ProtocolConstants.DataFrameChunkBytes;
-                int compBufSize = 9 + ProtocolConstants.DataFrameChunkBytes;
-                byte[] bufA = ArrayPool<byte>.Shared.Rent(frameBufSize);
-                byte[] bufB = ArrayPool<byte>.Shared.Rent(frameBufSize);
-                byte[]? compA = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
-                byte[]? compB = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
-                Task? pendingSend = null;
-                try
-                {
-                    long remaining = length;
-                    long pos = offset;
-                    bool useA = true;
+                await FrameProtocol.WriteJsonFrameAsync(
+                    stream,
+                    FrameType.PushChunkRequest,
+                    new PushChunkRequestMessage(remoteRelativePath, totalFileSize, offset, length, lastModifiedUtc, allowCompress),
+                    ct).ConfigureAwait(false);
+                headerSent = true;
 
-                    while (remaining > 0)
+                if (handle is not null && length > 0)
+                {
+                    int frameBufSize = 5 + ProtocolConstants.DataFrameChunkBytes;
+                    int compBufSize = 9 + ProtocolConstants.DataFrameChunkBytes;
+                    byte[] bufA = ArrayPool<byte>.Shared.Rent(frameBufSize);
+                    byte[] bufB = ArrayPool<byte>.Shared.Rent(frameBufSize);
+                    byte[]? compA = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
+                    byte[]? compB = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
+                    Task? pendingSend = null;
+                    try
                     {
-                        byte[] curBuf = useA ? bufA : bufB;
-                        byte[]? curComp = useA ? compA : compB;
-                        int toRead = (int)Math.Min(remaining, ProtocolConstants.DataFrameChunkBytes);
-                        int read = await RandomAccess.ReadAsync(handle, curBuf.AsMemory(5, toRead), pos, ct).ConfigureAwait(false);
-                        if (read == 0) break;
+                        long remaining = length;
+                        long pos = offset;
+                        bool useA = true;
+
+                        while (remaining > 0)
+                        {
+                            byte[] curBuf = useA ? bufA : bufB;
+                            byte[]? curComp = useA ? compA : compB;
+                            int toRead = (int)Math.Min(remaining, ProtocolConstants.DataFrameChunkBytes);
+                            int read = await RandomAccess.ReadAsync(handle, curBuf.AsMemory(5, toRead), pos, ct).ConfigureAwait(false);
+                            if (read == 0) break;
+
+                            if (pendingSend is not null)
+                                await pendingSend.ConfigureAwait(false);
+
+                            if (curComp is not null && CompressionHelper.TryCompressPreframed(curBuf.AsSpan(5, read), curComp, out int compPacketBytes))
+                            {
+                                pendingSend = stream.WriteAsync(curComp.AsMemory(0, compPacketBytes), ct).AsTask();
+                            }
+                            else
+                            {
+                                pendingSend = FrameProtocol.WritePreframedDataAsync(stream, curBuf, read, ct).AsTask();
+                            }
+                            pos += read;
+                            remaining -= read;
+                            useA = !useA;
+                            onBytesSent(read);
+                        }
 
                         if (pendingSend is not null)
                             await pendingSend.ConfigureAwait(false);
-
-                        if (curComp is not null && CompressionHelper.TryCompressPreframed(curBuf.AsSpan(5, read), curComp, out int compPacketBytes))
-                        {
-                            pendingSend = stream.WriteAsync(curComp.AsMemory(0, compPacketBytes), ct).AsTask();
-                        }
-                        else
-                        {
-                            pendingSend = FrameProtocol.WritePreframedDataAsync(stream, curBuf, read, ct).AsTask();
-                        }
-                        pos += read;
-                        remaining -= read;
-                        useA = !useA;
-                        onBytesSent(read);
                     }
-
-                    if (pendingSend is not null)
-                        await pendingSend.ConfigureAwait(false);
-                }
-                finally
-                {
-                    if (pendingSend is not null)
+                    finally
                     {
-                        try { await pendingSend.ConfigureAwait(false); } catch { }
+                        if (pendingSend is not null)
+                        {
+                            try { await pendingSend.ConfigureAwait(false); } catch { }
+                        }
+                        ArrayPool<byte>.Shared.Return(bufA);
+                        ArrayPool<byte>.Shared.Return(bufB);
+                        if (compA is not null) ArrayPool<byte>.Shared.Return(compA);
+                        if (compB is not null) ArrayPool<byte>.Shared.Return(compB);
                     }
-                    ArrayPool<byte>.Shared.Return(bufA);
-                    ArrayPool<byte>.Shared.Return(bufB);
-                    if (compA is not null) ArrayPool<byte>.Shared.Return(compA);
-                    if (compB is not null) ArrayPool<byte>.Shared.Return(compB);
                 }
-            }
 
-            await FrameProtocol.WriteFrameAsync(stream, FrameType.DataEnd, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
-            return await FrameProtocol.ReadJsonFrameAsync<PushChunkAckMessage>(stream, FrameType.PushChunkAck, ct).ConfigureAwait(false);
+                await FrameProtocol.WriteFrameAsync(stream, FrameType.DataEnd, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+                var ack = await FrameProtocol.ReadJsonFrameAsync<PushChunkAckMessage>(stream, FrameType.PushChunkAck, ct).ConfigureAwait(false);
+                ackReceived = true;
+                return ack;
+            }
+            catch
+            {
+                if (headerSent && !ackReceived)
+                    await DisconnectAsync().ConfigureAwait(false);
+                throw;
+            }
         }
         finally
         {
