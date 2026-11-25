@@ -419,6 +419,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(WebPortalToggleText));
                 OnPropertyChanged(nameof(WebPortalShortToggleText));
                 OnPropertyChanged(nameof(WebPortalStatusBrush));
+                RegenerateQrBitmap();
             }
         }
     }
@@ -1947,27 +1948,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 unsafe
                 {
                     byte* ptr = (byte*)fb.Address;
+                    int stride = fb.RowBytes;
                     for (int y = 0; y < pxSize; y++)
                     {
+                        byte* row = ptr + y * stride;
                         int my = y / scale - quiet;
                         for (int x = 0; x < pxSize; x++)
                         {
                             int mx = x / scale - quiet;
                             bool dark = mx >= 0 && mx < modules && my >= 0 && my < modules && matrix[my, mx];
-                            int idx = (y * pxSize + x) * 4;
-                            byte c = dark ? (byte)15 : (byte)255;
-                            ptr[idx] = c;
-                            ptr[idx + 1] = dark ? (byte)23 : (byte)255;
-                            ptr[idx + 2] = dark ? (byte)42 : (byte)255;
-                            ptr[idx + 3] = 255;
+                            int idx = x * 4;
+                            byte c = dark ? (byte)0 : (byte)255;
+                            row[idx] = c;
+                            row[idx + 1] = c;
+                            row[idx + 2] = c;
+                            row[idx + 3] = 255;
                         }
                     }
                 }
             }
             WebPortalQrBitmap = wb;
         }
-        catch
+        catch (Exception ex)
         {
+            AppendLog($"QR render error: {ex.Message}");
             WebPortalQrBitmap = null;
         }
     }
@@ -1998,6 +2002,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
             int portalPort = _webPortal.IsRunning ? _webPortal.ListeningPort : WebPortalServer.DefaultHttpPort;
             WebPortalUrl = bestV4 is not null ? $"http://{bestV4.Address}:{portalPort}" : $"http://localhost:{portalPort}";
+            if (IsWebPortalRunning)
+                RegenerateQrBitmap();
         });
     }
 
