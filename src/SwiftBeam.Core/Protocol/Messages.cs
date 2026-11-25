@@ -65,7 +65,10 @@ public sealed record AuthChallengeMessage(
 public sealed record AuthResponseMessage(
     string ClientName,
     string ClientNonceB64,
-    string ProofB64);
+    string ProofB64,
+    int ReverseCallbackPort = 0,
+    string? ReverseCallbackToken = null,
+    string? MutualAuthToken = null);
 
 public sealed record AuthResultMessage(
     bool Success,

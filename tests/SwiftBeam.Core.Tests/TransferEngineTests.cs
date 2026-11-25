@@ -1644,6 +1644,99 @@ public sealed class TransferEngineTests : IDisposable
         Assert.NotEmpty(Directory.GetFiles(trashDir, "from_remote.txt", SearchOption.AllDirectories));
     }
 
+    [Fact]
+    public async Task MutualReverseConnect_HostAutoConnectsBackAndRecordsHostTransferHistory()
+    {
+        string dirA = Path.Combine(_rootTemp, "peerA");
+        string dirB = Path.Combine(_rootTemp, "peerB");
+        Directory.CreateDirectory(dirA);
+        Directory.CreateDirectory(dirB);
+        await File.WriteAllTextAsync(Path.Combine(dirA, "fromA.txt"), "Payload from PC A");
+        string localToPush = Path.Combine(_rootTemp, "pushToB.txt");
+        await File.WriteAllTextAsync(localToPush, "Uploaded from PC A to PC B");
+
+        await using var serverA = new FileShareServer(new FileShareServerOptions
+        {
+            DeviceName = "PC-A",
+            Port = 0,
+            SharedDirectory = dirA,
+            Pin = "111111",
+            RequirePin = true,
+            AllowUnencrypted = true
+        });
+        await using var serverB = new FileShareServer(new FileShareServerOptions
+        {
+            DeviceName = "PC-B",
+            Port = 0,
+            SharedDirectory = dirB,
+            Pin = "222222",
+            RequirePin = true,
+            AllowUnencrypted = true
+        });
+        serverA.Start();
+        serverB.Start();
+
+        var offerTcs = new TaskCompletionSource<MutualPeerOffer>(TaskCreationOptions.RunContinuationsAsynchronously);
+        serverB.MutualPeerOfferReceived += offer => offerTcs.TrySetResult(offer);
+
+        var hostPullHistory = new List<HostTransferRecord>();
+        var hostPushHistory = new List<HostTransferRecord>();
+        serverA.HostTransferCompleted += r => hostPullHistory.Add(r);
+        serverB.HostTransferCompleted += r => hostPushHistory.Add(r);
+
+        // PC A connects to PC B using PIN 222222 and offers a reverse mutual-auth token on Server A
+        string revToken = serverA.RegisterReverseConnectToken("127.0.0.1");
+        await using var clientA = new TransferClient();
+        await clientA.ConnectAsync(new ConnectionTarget(
+            "127.0.0.1", serverB.ListeningPort, "222222", true, "PC-A",
+            ReverseCallbackPort: serverA.ListeningPort,
+            ReverseCallbackToken: revToken));
+
+        var receivedOffer = await offerTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("PC-A", receivedOffer.ClientName);
+        Assert.Equal(serverA.ListeningPort, receivedOffer.CallbackPort);
+        Assert.Equal(revToken, receivedOffer.MutualAuthToken);
+
+        // PC B connects back to PC A without needing PC A's PIN (111111) using MutualAuthToken
+        await using var clientB = new TransferClient();
+        var metaA = await clientB.ConnectAsync(new ConnectionTarget(
+            receivedOffer.RemoteAddress,
+            receivedOffer.CallbackPort,
+            Pin: string.Empty,
+            UseTls: receivedOffer.TlsActive,
+            ClientName: "PC-B",
+            MutualAuthToken: receivedOffer.MutualAuthToken));
+
+        Assert.Equal("PC-A", metaA.DeviceName);
+        var listA = await clientB.ListDirectoryAsync("");
+        Assert.Contains(listA.Entries, e => e.Name == "fromA.txt");
+
+        // PC B pulls fromA.txt from PC A -> Server A records Push history
+        var pullHeader = await clientB.PullRangeAsync("fromA.txt", 0, -1, (_, _, _) => ValueTask.CompletedTask);
+        Assert.True(pullHeader.Success);
+        Assert.Contains(hostPullHistory, h => h.FileName == "fromA.txt" && h.Direction == TransferDirection.Push && h.PeerName == "PC-B");
+
+        // PC A pushes pushToB.txt to PC B -> Server B records Pull (received) history
+        byte[] pushBytes = await File.ReadAllBytesAsync(localToPush);
+        var pushAck = await clientA.PushRangeAsync("pushToB.txt", localToPush, pushBytes.Length, DateTime.UtcNow, 0, pushBytes.Length, _ => { });
+        Assert.True(pushAck.Success);
+        var finAck = await clientA.FinalizePushAsync("pushToB.txt", pushBytes.Length, DateTime.UtcNow, null);
+        Assert.True(finAck.Success);
+        Assert.Contains(hostPushHistory, h => h.FileName == "pushToB.txt" && h.Direction == TransferDirection.Pull && h.PeerName == "PC-A");
+
+        // Revoking token rejects new reverse-token logins
+        serverA.RevokeReverseConnectToken(revToken);
+        await using var rejectedClient = new TransferClient();
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(async () =>
+            await rejectedClient.ConnectAsync(new ConnectionTarget(
+                receivedOffer.RemoteAddress,
+                receivedOffer.CallbackPort,
+                Pin: string.Empty,
+                UseTls: receivedOffer.TlsActive,
+                ClientName: "PC-B",
+                MutualAuthToken: revToken)));
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }

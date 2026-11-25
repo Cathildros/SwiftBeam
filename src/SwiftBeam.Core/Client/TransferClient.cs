@@ -12,7 +12,10 @@ public sealed record ConnectionTarget(
     int Port,
     string Pin,
     bool UseTls,
-    string ClientName);
+    string ClientName,
+    int ReverseCallbackPort = 0,
+    string? ReverseCallbackToken = null,
+    string? MutualAuthToken = null);
 
 public sealed record ConnectedPeerMetadata(
     string ServerId,
@@ -94,14 +97,17 @@ public sealed class TransferClient : IAsyncDisposable
 
             byte[] serverNonce = Convert.FromBase64String(challenge.ServerNonceB64);
             byte[] clientNonce = PinAuth.GenerateNonce();
-            byte[] proof = challenge.RequiresPin
+            byte[] proof = challenge.RequiresPin && string.IsNullOrWhiteSpace(target.MutualAuthToken)
                 ? PinAuth.ComputeProof(target.Pin, serverNonce, clientNonce, target.UseTls ? remoteCertHash : null)
                 : Array.Empty<byte>();
 
             var response = new AuthResponseMessage(
                 string.IsNullOrWhiteSpace(target.ClientName) ? Environment.MachineName : target.ClientName,
                 Convert.ToBase64String(clientNonce),
-                Convert.ToBase64String(proof));
+                Convert.ToBase64String(proof),
+                target.ReverseCallbackPort,
+                target.ReverseCallbackToken,
+                target.MutualAuthToken);
 
             await FrameProtocol.WriteJsonFrameAsync(activeStream, FrameType.AuthResponse, response, ct).ConfigureAwait(false);
 

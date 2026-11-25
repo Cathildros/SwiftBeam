@@ -349,7 +349,7 @@ public sealed class TransferHistoryItemViewModel
     public string TimestampText => Model.CompletedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
     public string StatusText => Model.FinalStatus.ToString();
     public IBrush StatusBrush { get; }
-    public bool CanOpenFolder => Model.Direction == TransferDirection.Pull && !string.IsNullOrWhiteSpace(Model.LocalPath);
+    public bool CanOpenFolder => !string.IsNullOrWhiteSpace(Model.LocalPath);
 
     public TransferHistoryItemViewModel(TransferHistoryEntry model)
     {

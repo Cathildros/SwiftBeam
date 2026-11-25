@@ -46,6 +46,7 @@ public sealed class WebPortalServer : IAsyncDisposable
     public event Action<string>? Log;
     public event Action<string, string>? TextReceived;
     public event Action? StatsChanged;
+    public event Action<HostTransferRecord>? HostTransferCompleted;
 
     public WebPortalServer(FileShareServer fileServer, int port = DefaultHttpPort)
     {
@@ -293,10 +294,12 @@ public sealed class WebPortalServer : IAsyncDisposable
                         }
 
                         string fileName = Path.GetFileName(fullPath);
+                        long fileSize = new FileInfo(fullPath).Length;
                         await StreamFileDownloadAsync(stream, fullPath, fileName, "application/octet-stream", ct).ConfigureAwait(false);
                         Interlocked.Increment(ref _downloadedCount);
                         StatsChanged?.Invoke();
                         Log?.Invoke($"Web/Phone downloaded: {fileName}");
+                        HostTransferCompleted?.Invoke(new HostTransferRecord(fileName, fullPath, "Phone / Web", TransferDirection.Push, fileSize, 0, DateTime.UtcNow));
                         return;
                     }
 
@@ -363,6 +366,7 @@ public sealed class WebPortalServer : IAsyncDisposable
                             StatsChanged?.Invoke();
                             string finalName = Path.GetFileName(desiredTarget);
                             Log?.Invoke($"Web/Phone uploaded: {finalName} ({TransferManager.FormatBytes(written)})");
+                            HostTransferCompleted?.Invoke(new HostTransferRecord(finalName, desiredTarget, "Phone / Web", TransferDirection.Pull, written, 0, DateTime.UtcNow));
                             await SendJsonAsync(stream, 200, new { ok = true, fileName = finalName, size = written }, ct, keepAlive: false).ConfigureAwait(false);
                         }
                         catch

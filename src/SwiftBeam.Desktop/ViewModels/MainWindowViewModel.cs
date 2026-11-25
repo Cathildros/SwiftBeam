@@ -82,10 +82,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private ConnectedPeerMetadata? _connectedPeer;
     private ConnectionTarget? _lastConnectionTarget;
     private DateTime _lastAutoRefreshUtc = DateTime.MinValue;
+    private DateTime _lastHostPullRefreshUtc = DateTime.MinValue;
     private string _connectedEndpointSummary = string.Empty;
     private string _connectionError = string.Empty;
     private ConnectPopoverStep _connectStep = ConnectPopoverStep.PickTarget;
     private string _connectTargetDisplayName = string.Empty;
+    private string? _activeReverseToken;
+    private bool _isMutualReverseConnection;
+    private string? _mutualPeerRemoteAddress;
 
     // Local browser (Left Pane)
     private string _localPath = string.Empty;
@@ -1422,6 +1426,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 ? HostApprovalPromptHandler(name, ip, isWrite)
                 : Task.FromResult(true);
         _server.TextReceived += OnServerTextReceived;
+        _server.MutualPeerOfferReceived += OnMutualPeerOfferReceived;
+        _server.HostTransferCompleted += OnHostTransferCompleted;
         _server.StatsChanged += (active, bytes) =>
         {
             Dispatcher.UIThread.Post(() =>
@@ -1450,6 +1456,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _webPortal = new WebPortalServer(_server);
         _webPortal.Log += AppendLog;
         _webPortal.TextReceived += OnServerTextReceived;
+        _webPortal.HostTransferCompleted += OnHostTransferCompleted;
         _webPortal.StatsChanged += () => Dispatcher.UIThread.Post(UpdateWebPortalStatusText);
 
         _discovery = new PeerDiscoveryService(
@@ -2221,15 +2228,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return new ConnectAttemptResult(false, false, msg);
         }
 
-        var target = new ConnectionTarget(host, port, ConnectPin.Trim(), ConnectUseTls, _settings.DeviceName);
+        string? oldRev = _activeReverseToken;
+        _activeReverseToken = _server.IsRunning ? _server.RegisterReverseConnectToken(host) : null;
+        if (!string.IsNullOrEmpty(oldRev))
+            _server.RevokeReverseConnectToken(oldRev);
+
+        var browseTarget = new ConnectionTarget(
+            host,
+            port,
+            ConnectPin.Trim(),
+            ConnectUseTls,
+            _settings.DeviceName,
+            ReverseCallbackPort: _server.IsRunning ? _server.ListeningPort : 0,
+            ReverseCallbackToken: _activeReverseToken);
+        var transferTarget = new ConnectionTarget(host, port, ConnectPin.Trim(), ConnectUseTls, _settings.DeviceName);
 
         try
         {
             IsConnecting = true;
-            var meta = await _browseClient.ConnectAsync(target);
-            _transferManager.ConfigureTarget(target);
+            var meta = await _browseClient.ConnectAsync(browseTarget);
+            _transferManager.ConfigureTarget(transferTarget);
 
-            _lastConnectionTarget = target;
+            _isMutualReverseConnection = false;
+            _mutualPeerRemoteAddress = host;
+            _lastConnectionTarget = transferTarget;
             _connectedPeer = meta;
             string encBadge = meta.TlsActive ? "TLS 1.3" : "Direct Plain";
             string linkBadge = SelectedPeerEndpoint?.LinkBadge ?? "Network";
@@ -2254,6 +2276,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         catch (UnauthorizedAccessException ex)
         {
+            _server.RevokeReverseConnectToken(_activeReverseToken);
+            _activeReverseToken = null;
+            _mutualPeerRemoteAddress = null;
             _connectedPeer = null;
             IsConnected = false;
             ConnectionError = ex.Message;
@@ -2262,6 +2287,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception ex)
         {
+            _server.RevokeReverseConnectToken(_activeReverseToken);
+            _activeReverseToken = null;
+            _mutualPeerRemoteAddress = null;
             _connectedPeer = null;
             IsConnected = false;
             ConnectionError = ex.Message;
@@ -2274,9 +2302,76 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task DisconnectPeerAsync()
+    private void OnMutualPeerOfferReceived(MutualPeerOffer offer)
     {
+        Dispatcher.UIThread.Post(async () =>
+        {
+            if (IsConnected || IsConnecting || string.IsNullOrWhiteSpace(offer.RemoteAddress) || offer.CallbackPort <= 0)
+                return;
+
+            var transferTarget = new ConnectionTarget(
+                offer.RemoteAddress,
+                offer.CallbackPort,
+                string.Empty,
+                offer.TlsActive,
+                _settings.DeviceName,
+                MutualAuthToken: offer.MutualAuthToken);
+
+            try
+            {
+                IsConnecting = true;
+                var meta = await _browseClient.ConnectAsync(transferTarget);
+                _transferManager.ConfigureTarget(transferTarget);
+
+                _isMutualReverseConnection = true;
+                _mutualPeerRemoteAddress = offer.RemoteAddress;
+                _lastConnectionTarget = transferTarget;
+                _connectedPeer = meta;
+                string encBadge = meta.TlsActive ? "TLS 1.3" : "Direct Plain";
+                _connectedEndpointSummary = $"{offer.RemoteAddress}:{offer.CallbackPort} • Mutual • {encBadge}";
+                ConnectTargetDisplayName = meta.DeviceName;
+                IsConnected = true;
+
+                ReloadPinnedRemoteFolders();
+                AppendLog($"Auto-connected back to {meta.DeviceName} ({offer.RemoteAddress}:{offer.CallbackPort}, {encBadge})");
+                ShowToast($"Connected with {meta.DeviceName}");
+
+                string initialPath = meta.FullFilesystemAccess
+                    ? (!string.IsNullOrWhiteSpace(meta.HomePath) ? meta.HomePath : FileShareServer.DrivesVirtualPath)
+                    : string.Empty;
+                await LoadRemoteDirectoryAsync(initialPath);
+            }
+            catch (Exception ex)
+            {
+                _isMutualReverseConnection = false;
+                _mutualPeerRemoteAddress = null;
+                AppendLog($"Mutual reverse-connect to {offer.ClientName} skipped ({ex.Message})");
+            }
+            finally
+            {
+                IsConnecting = false;
+            }
+        });
+    }
+
+    private Task DisconnectPeerAsync() => DisconnectPeerAsync(notifyPeerClosed: false);
+
+    private async Task DisconnectPeerAsync(bool notifyPeerClosed)
+    {
+        string? peerToKick = _mutualPeerRemoteAddress;
+        string? revToken = _activeReverseToken;
+        string? disconnectedName = _connectedPeer?.DeviceName;
+
+        _activeReverseToken = null;
+        _isMutualReverseConnection = false;
+        _mutualPeerRemoteAddress = null;
+
         await _browseClient.DisconnectAsync();
+        if (!string.IsNullOrEmpty(revToken))
+            _server.RevokeReverseConnectToken(revToken);
+        if (!notifyPeerClosed && !string.IsNullOrWhiteSpace(peerToKick))
+            await _server.DisconnectPeerAsync(peerToKick);
+
         _lastConnectionTarget = null;
         _connectedPeer = null;
         _connectedEndpointSummary = string.Empty;
@@ -2292,6 +2387,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         FilteredRemoteEntries.Clear();
         RemoteSelectionText = "Not connected";
         AppendLog("Disconnected from remote computer.");
+        if (notifyPeerClosed && !string.IsNullOrWhiteSpace(disconnectedName))
+            ShowToast($"{disconnectedName} disconnected");
     }
 
     public async Task OpenRemoteEntryAsync(RemoteEntryViewModel entry)
@@ -3168,6 +3265,50 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ApplyHistoryFilter();
     }
 
+    private void OnHostTransferCompleted(HostTransferRecord rec)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            var entry = new TransferHistoryEntry(
+                Guid.NewGuid().ToString("N")[..12],
+                rec.CompletedUtc,
+                rec.Direction,
+                rec.FileName,
+                rec.LocalFullPath,
+                rec.FileName,
+                rec.PeerName,
+                rec.TotalBytes,
+                rec.AverageBytesPerSec,
+                TransferStatus.Completed);
+
+            var updated = TransferHistoryStore.Append(AppSettings.GetHistoryFilePath(), entry);
+            _allHistoryItems.Clear();
+            foreach (var h in updated)
+                _allHistoryItems.Add(new TransferHistoryItemViewModel(h));
+            ApplyHistoryFilter();
+
+            if (rec.Direction == TransferDirection.Pull && !string.IsNullOrWhiteSpace(rec.LocalFullPath))
+            {
+                string? destParent = Path.GetDirectoryName(rec.LocalFullPath);
+                if (!string.IsNullOrEmpty(destParent) &&
+                    !string.IsNullOrEmpty(LocalPath) &&
+                    LocalPath != FileShareServer.DrivesVirtualPath &&
+                    string.Equals(Path.GetFullPath(destParent).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                                  Path.GetFullPath(LocalPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                                  StringComparison.OrdinalIgnoreCase) &&
+                    !_allLocalEntries.Any(e => e.IsSelected))
+                {
+                    var now = DateTime.UtcNow;
+                    if ((now - _lastHostPullRefreshUtc).TotalSeconds >= 1.5)
+                    {
+                        _lastHostPullRefreshUtc = now;
+                        LoadLocalDirectory(LocalPath);
+                    }
+                }
+            }
+        });
+    }
+
     private void RefreshFailedFlag()
     {
         HasFailedTransfers = Transfers.Any(t => t.Model.Status == TransferStatus.Failed);
@@ -3240,7 +3381,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void OnIncomingActivityChanged(IReadOnlyList<IncomingPeerActivity> peers)
     {
-        Dispatcher.UIThread.Post(() =>
+        Dispatcher.UIThread.Post(async () =>
         {
             bool wasConnected = _hasIncomingPeer;
             if (peers.Count == 0)
@@ -3249,6 +3390,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 IncomingPeerBadge = "PEER CONNECTED";
                 IncomingPeerSummary = string.Empty;
                 TrayTooltipText = $"SwiftBeam ({_settings.DeviceName})";
+
+                if (IsConnected && !IsConnecting && (_isMutualReverseConnection || !string.IsNullOrEmpty(_activeReverseToken)))
+                {
+                    if (!await _browseClient.PingAsync() && IsConnected && !IsConnecting)
+                        await DisconnectPeerAsync(notifyPeerClosed: true);
+                }
                 return;
             }
 
@@ -3268,11 +3415,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             string extraPeers = peers.Count > 1 ? $" (+{peers.Count - 1} more)" : string.Empty;
             string enc = primary.TlsActive ? "TLS" : "Direct";
 
+            bool isSameAsConnectedPeer = IsConnected && _connectedPeer is not null && peers.Count == 1 &&
+                (primary.ClientName.Equals(_connectedPeer.DeviceName, StringComparison.OrdinalIgnoreCase) ||
+                 (!string.IsNullOrEmpty(_mutualPeerRemoteAddress) && string.Equals(primary.RemoteAddress, _mutualPeerRemoteAddress, StringComparison.OrdinalIgnoreCase)));
+
             IncomingPeerSummary = $"{primary.ClientName} ({primary.RemoteAddress}){extraPeers} • {primary.CurrentAction} • {primary.ActiveStreams} stream(s){rateText}{totalText} • {enc}";
-            HasIncomingPeer = true;
+            HasIncomingPeer = !isSameAsConnectedPeer || activelyTransferring;
             TrayTooltipText = $"SwiftBeam ({_settings.DeviceName}) — {primary.ClientName}: {primary.CurrentAction}";
 
-            if (!wasConnected)
+            if (!wasConnected && !isSameAsConnectedPeer)
             {
                 ShowToast($"{primary.ClientName} connected to this computer");
             }

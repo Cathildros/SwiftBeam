@@ -23,6 +23,22 @@ public sealed record IncomingPeerActivity(
     double BytesPerSec,
     long TotalBytesTransferred);
 
+public sealed record MutualPeerOffer(
+    string ClientName,
+    string RemoteAddress,
+    int CallbackPort,
+    bool TlsActive,
+    string MutualAuthToken);
+
+public sealed record HostTransferRecord(
+    string FileName,
+    string LocalFullPath,
+    string PeerName,
+    TransferDirection Direction,
+    long TotalBytes,
+    double AverageBytesPerSec,
+    DateTime CompletedUtc);
+
 public sealed class FileShareServerOptions
 {
     public string ServerId { get; set; } = Guid.NewGuid().ToString("N")[..12];
@@ -80,6 +96,7 @@ public sealed class FileShareServer : IAsyncDisposable
         public CancellationTokenSource SessionCts { get; } = new();
         public string CurrentAction = "Connected (idle)";
         public long TotalBytes;
+        public string? MutualAuthToken;
 
         public ClientSession(string clientName, string remoteAddress, bool tlsActive)
         {
@@ -87,6 +104,21 @@ public sealed class FileShareServer : IAsyncDisposable
             RemoteAddress = remoteAddress;
             TlsActive = tlsActive;
         }
+    }
+
+    private sealed class ReverseTokenEntry
+    {
+        public string? ExpectedIp { get; init; }
+        public DateTime CreatedUtc { get; init; }
+    }
+
+    private sealed class PullTrackerEntry
+    {
+        public long FileSize { get; init; }
+        public long StartTicks { get; init; }
+        public long BytesSent;
+        public long LastUsedTicks;
+        public int Recorded;
     }
 
     private sealed class PeerRateState
@@ -99,9 +131,12 @@ public sealed class FileShareServer : IAsyncDisposable
 
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _pushFileLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PushHandleEntry> _activePushHandles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _pushStartTicks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PullHandleEntry> _activePullHandles = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _pullFileLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, PullTrackerEntry> _pullTrackers = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ClientSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ReverseTokenEntry> _reverseTokens = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PeerRateState> _peerRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<bool>>> _approvedPeers = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _activityEmitLock = new();
@@ -126,6 +161,8 @@ public sealed class FileShareServer : IAsyncDisposable
     public event Action<int, long>? StatsChanged;
     public event Action<IReadOnlyList<IncomingPeerActivity>>? IncomingActivityChanged;
     public event Action<string, string>? TextReceived;
+    public event Action<MutualPeerOffer>? MutualPeerOfferReceived;
+    public event Action<HostTransferRecord>? HostTransferCompleted;
     public Func<string, string, bool, Task<bool>>? ConnectionApprovalHandler { get; set; }
 
     public FileShareServer(FileShareServerOptions options)
@@ -239,7 +276,64 @@ public sealed class FileShareServer : IAsyncDisposable
                     }
                 }
             }
+
+            long maxTrackerIdleTicks = TimeSpan.FromMinutes(2).Ticks;
+            foreach (var kv in _pullTrackers)
+            {
+                if (nowTicks - Interlocked.Read(ref kv.Value.LastUsedTicks) > maxTrackerIdleTicks)
+                    _pullTrackers.TryRemove(kv.Key, out _);
+            }
         }
+    }
+
+    public string RegisterReverseConnectToken(string? expectedPeerHost = null)
+    {
+        string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+        string? expectedIp = null;
+        if (!string.IsNullOrWhiteSpace(expectedPeerHost) && IPAddress.TryParse(expectedPeerHost.Trim(), out var parsed))
+            expectedIp = parsed.IsIPv4MappedToIPv6 ? parsed.MapToIPv4().ToString() : parsed.ToString();
+
+        _reverseTokens[token] = new ReverseTokenEntry
+        {
+            ExpectedIp = expectedIp,
+            CreatedUtc = DateTime.UtcNow
+        };
+        return token;
+    }
+
+    public void RevokeReverseConnectToken(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return;
+        _reverseTokens.TryRemove(token, out _);
+        foreach (var kv in _sessions)
+        {
+            if (string.Equals(kv.Value.MutualAuthToken, token, StringComparison.Ordinal))
+            {
+                try { kv.Value.SessionCts.Cancel(); } catch { }
+            }
+        }
+    }
+
+    public Task DisconnectPeerAsync(string remoteAddressOrName)
+    {
+        if (string.IsNullOrWhiteSpace(remoteAddressOrName))
+            return Task.CompletedTask;
+
+        foreach (var kv in _approvedPeers)
+        {
+            if (kv.Key.Contains(remoteAddressOrName, StringComparison.OrdinalIgnoreCase))
+                _approvedPeers.TryRemove(kv.Key, out _);
+        }
+
+        foreach (var kv in _sessions)
+        {
+            if (kv.Value.RemoteAddress.Equals(remoteAddressOrName, StringComparison.OrdinalIgnoreCase) ||
+                kv.Value.ClientName.Equals(remoteAddressOrName, StringComparison.OrdinalIgnoreCase))
+            {
+                try { kv.Value.SessionCts.Cancel(); } catch { }
+            }
+        }
+        return Task.CompletedTask;
     }
 
     public IReadOnlyList<IncomingPeerActivity> GetIncomingActivitySnapshot()
@@ -459,7 +553,19 @@ public sealed class FileShareServer : IAsyncDisposable
 
                 var authResp = await FrameProtocol.ReadJsonFrameAsync<AuthResponseMessage>(activeStream, FrameType.AuthResponse, ct).ConfigureAwait(false);
 
-                if (_options.RequirePin)
+                bool usedMutualToken = false;
+                if (!string.IsNullOrWhiteSpace(authResp.MutualAuthToken) &&
+                    _reverseTokens.TryGetValue(authResp.MutualAuthToken, out var tokenEntry))
+                {
+                    bool ipMatches = string.IsNullOrEmpty(tokenEntry.ExpectedIp) ||
+                                     string.Equals(remoteIpOnly, tokenEntry.ExpectedIp, StringComparison.OrdinalIgnoreCase) ||
+                                     (IPAddress.TryParse(remoteIpOnly, out var remIp) && IPAddress.IsLoopback(remIp) &&
+                                      IPAddress.TryParse(tokenEntry.ExpectedIp, out var expIp) && IPAddress.IsLoopback(expIp));
+                    if (ipMatches)
+                        usedMutualToken = true;
+                }
+
+                if (!usedMutualToken && _options.RequirePin)
                 {
                     byte[] clientNonce = Convert.FromBase64String(authResp.ClientNonceB64);
                     byte[] proof = Convert.FromBase64String(authResp.ProofB64);
@@ -478,7 +584,7 @@ public sealed class FileShareServer : IAsyncDisposable
                 }
 
                 string clientLabel = string.IsNullOrWhiteSpace(authResp.ClientName) ? remoteIpOnly : authResp.ClientName;
-                if (_options.RequireHostApproval && ConnectionApprovalHandler is not null)
+                if (!usedMutualToken && _options.RequireHostApproval && ConnectionApprovalHandler is not null)
                 {
                     string approvalKey = $"{clientLabel}|{remoteIpOnly}";
                     var approvalLazy = _approvedPeers.GetOrAdd(approvalKey, _ =>
@@ -513,13 +619,27 @@ public sealed class FileShareServer : IAsyncDisposable
                     new AuthResultMessage(true, null, rootName, _options.AllowFullFilesystem, home, desktop, downloads, documents, _options.ReadOnly),
                     ct).ConfigureAwait(false);
 
-                session = new ClientSession(clientLabel, remoteIpOnly, useTls);
+                session = new ClientSession(clientLabel, remoteIpOnly, useTls)
+                {
+                    MutualAuthToken = usedMutualToken ? authResp.MutualAuthToken : null
+                };
                 _sessions[session.SessionId] = session;
 
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, session.SessionCts.Token);
                 using var closeReg = linkedCts.Token.Register(() => { try { tcpClient.Dispose(); } catch { } });
 
                 EmitStatsAndActivity(updateRates: false);
+                if (!usedMutualToken &&
+                    authResp.ReverseCallbackPort > 0 &&
+                    !string.IsNullOrWhiteSpace(authResp.ReverseCallbackToken))
+                {
+                    MutualPeerOfferReceived?.Invoke(new MutualPeerOffer(
+                        clientLabel,
+                        remoteIpOnly,
+                        authResp.ReverseCallbackPort,
+                        useTls,
+                        authResp.ReverseCallbackToken));
+                }
                 await CommandLoopAsync(activeStream, session, linkedCts.Token).ConfigureAwait(false);
             }
             finally
@@ -627,7 +747,7 @@ public sealed class FileShareServer : IAsyncDisposable
                 case FrameType.PushFinalizeRequest:
                 {
                     var req = FrameProtocol.DeserializePayload<PushFinalizeRequestMessage>(frame.Value.Payload);
-                    var resp = await HandlePushFinalizeAsync(req, ct).ConfigureAwait(false);
+                    var resp = await HandlePushFinalizeAsync(req, session, ct).ConfigureAwait(false);
                     await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PushFinalizeAck, resp, ct).ConfigureAwait(false);
                     break;
                 }
@@ -1272,6 +1392,30 @@ public sealed class FileShareServer : IAsyncDisposable
             await FrameProtocol.WriteJsonFrameAsync(stream, FrameType.PullRangeHeader,
                 new PullRangeHeaderMessage(true, fileSize, fi.LastWriteTimeUtc, offset, requestedLen), ct).ConfigureAwait(false);
 
+            string trackerKey = $"{session.ClientName}|{fullPath}";
+            PullTrackerEntry? tracker = requestedLen > 0
+                ? _pullTrackers.GetOrAdd(trackerKey, _ => new PullTrackerEntry
+                {
+                    FileSize = fileSize,
+                    StartTicks = Stopwatch.GetTimestamp(),
+                    LastUsedTicks = DateTime.UtcNow.Ticks
+                })
+                : null;
+            if (tracker is not null)
+                Interlocked.Exchange(ref tracker.LastUsedTicks, DateTime.UtcNow.Ticks);
+
+            if (fileSize == 0 && req.Offset == 0)
+            {
+                HostTransferCompleted?.Invoke(new HostTransferRecord(
+                    Path.GetFileName(fullPath),
+                    fullPath,
+                    session.ClientName,
+                    TransferDirection.Push,
+                    0,
+                    0,
+                    DateTime.UtcNow));
+            }
+
             if (requestedLen > 0)
             {
                 bool allowCompress = req.AllowCompression && CompressionHelper.ShouldCompressFile(fullPath);
@@ -1287,6 +1431,7 @@ public sealed class FileShareServer : IAsyncDisposable
                 byte[]? compA = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
                 byte[]? compB = allowCompress ? ArrayPool<byte>.Shared.Rent(compBufSize) : null;
                 Task? pendingSend = null;
+                long sentInThisRange = 0;
                 try
                 {
                     long remaining = requestedLen;
@@ -1315,6 +1460,7 @@ public sealed class FileShareServer : IAsyncDisposable
                         }
                         pos += read;
                         remaining -= read;
+                        sentInThisRange += read;
                         useA = !useA;
 
                         RecordTransferredBytes(session, read);
@@ -1322,6 +1468,26 @@ public sealed class FileShareServer : IAsyncDisposable
 
                     if (pendingSend is not null)
                         await pendingSend.ConfigureAwait(false);
+
+                    if (tracker is not null && sentInThisRange > 0)
+                    {
+                        long totalSent = Interlocked.Add(ref tracker.BytesSent, sentInThisRange);
+                        Interlocked.Exchange(ref tracker.LastUsedTicks, DateTime.UtcNow.Ticks);
+                        if (totalSent >= tracker.FileSize && Interlocked.Exchange(ref tracker.Recorded, 1) == 0)
+                        {
+                            _pullTrackers.TryRemove(trackerKey, out _);
+                            double elapsed = Math.Max(0.01, Stopwatch.GetElapsedTime(tracker.StartTicks).TotalSeconds);
+                            double avgBps = tracker.FileSize / elapsed;
+                            HostTransferCompleted?.Invoke(new HostTransferRecord(
+                                Path.GetFileName(fullPath),
+                                fullPath,
+                                session.ClientName,
+                                TransferDirection.Push,
+                                tracker.FileSize,
+                                avgBps,
+                                DateTime.UtcNow));
+                        }
+                    }
                 }
                 finally
                 {
@@ -1363,6 +1529,7 @@ public sealed class FileShareServer : IAsyncDisposable
         }
 
         string partPath = fullPath + ".sbpart";
+        _pushStartTicks.TryAdd(partPath, Stopwatch.GetTimestamp());
         var fileLock = _pushFileLocks.GetOrAdd(partPath, _ => new SemaphoreSlim(1, 1));
 
         try
@@ -1514,7 +1681,7 @@ public sealed class FileShareServer : IAsyncDisposable
         }
     }
 
-    private async Task<PushFinalizeAckMessage> HandlePushFinalizeAsync(PushFinalizeRequestMessage req, CancellationToken ct)
+    private async Task<PushFinalizeAckMessage> HandlePushFinalizeAsync(PushFinalizeRequestMessage req, ClientSession session, CancellationToken ct)
     {
         if (_options.ReadOnly)
             return new PushFinalizeAckMessage(false, "Host is in Read-Only mode.");
@@ -1522,6 +1689,7 @@ public sealed class FileShareServer : IAsyncDisposable
             return new PushFinalizeAckMessage(false, "Invalid target path.");
 
         string partPath = fullPath + ".sbpart";
+        _pushStartTicks.TryRemove(partPath, out long pushStartTicks);
         var fileLock = _pushFileLocks.GetOrAdd(partPath, _ => new SemaphoreSlim(1, 1));
         await fileLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -1542,6 +1710,14 @@ public sealed class FileShareServer : IAsyncDisposable
                 try { if (File.Exists(partPath)) File.Delete(partPath); } catch { }
                 try { File.SetLastWriteTimeUtc(fullPath, req.LastModifiedUtc); } catch { }
                 Log?.Invoke($"Received file: {Path.GetFileName(fullPath)} (0 B)");
+                HostTransferCompleted?.Invoke(new HostTransferRecord(
+                    Path.GetFileName(fullPath),
+                    fullPath,
+                    session.ClientName,
+                    TransferDirection.Pull,
+                    0,
+                    0,
+                    DateTime.UtcNow));
                 return new PushFinalizeAckMessage(true);
             }
 
@@ -1560,7 +1736,17 @@ public sealed class FileShareServer : IAsyncDisposable
             EvictCachedHandles(fullPath);
             File.Move(partPath, fullPath, overwrite: true);
             try { File.SetLastWriteTimeUtc(fullPath, req.LastModifiedUtc); } catch { }
+            double elapsed = pushStartTicks > 0 ? Math.Max(0.01, Stopwatch.GetElapsedTime(pushStartTicks).TotalSeconds) : 0.01;
+            double avgBps = req.TotalFileSize / elapsed;
             Log?.Invoke($"Received file: {Path.GetFileName(fullPath)} ({req.TotalFileSize / (1024.0 * 1024.0):0.##} MB)");
+            HostTransferCompleted?.Invoke(new HostTransferRecord(
+                Path.GetFileName(fullPath),
+                fullPath,
+                session.ClientName,
+                TransferDirection.Pull,
+                req.TotalFileSize,
+                avgBps,
+                DateTime.UtcNow));
             return new PushFinalizeAckMessage(true);
         }
         catch (Exception ex)
