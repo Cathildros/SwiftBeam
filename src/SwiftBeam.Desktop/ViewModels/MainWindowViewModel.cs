@@ -1,7 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using Avalonia;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Threading;
 using SwiftBeam.Core.Client;
 using SwiftBeam.Core.Discovery;
@@ -28,6 +31,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private readonly AppSettings _settings;
     private readonly FileShareServer _server;
     private readonly InstallerWebServer _installerServer;
+    private readonly WebPortalServer _webPortal;
     private readonly PeerDiscoveryService _discovery;
     private readonly TransferClient _browseClient = new();
     private readonly TransferManager _transferManager = new();
@@ -53,6 +57,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _installerUrl = string.Empty;
     private string _installerStatusText = string.Empty;
     private int _installerDownloadsCount;
+    private bool _isWebPortalRunning;
+    private string _webPortalUrl = string.Empty;
+    private string _webPortalStatusText = "Off — scan QR from any phone or browser";
+    private bool _webPortalQrIncludePin = true;
+    private WriteableBitmap? _webPortalQrBitmap;
     private int _activeIncomingClients;
     private string _totalServedText = "0 B";
     private string _primaryAddressText = "Detecting network...";
@@ -160,15 +169,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(IsTransferTabActive));
                 OnPropertyChanged(nameof(IsHistoryTabActive));
                 OnPropertyChanged(nameof(IsSettingsTabActive));
-                OnPropertyChanged(nameof(IsLogTabActive));
                 OnPropertyChanged(nameof(TransferTabBg));
                 OnPropertyChanged(nameof(HistoryTabBg));
                 OnPropertyChanged(nameof(SettingsTabBg));
-                OnPropertyChanged(nameof(LogTabBg));
                 OnPropertyChanged(nameof(TransferTabFg));
                 OnPropertyChanged(nameof(HistoryTabFg));
                 OnPropertyChanged(nameof(SettingsTabFg));
-                OnPropertyChanged(nameof(LogTabFg));
             }
         }
     }
@@ -176,15 +182,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public bool IsTransferTabActive => _activeTabIndex == 0;
     public bool IsHistoryTabActive => _activeTabIndex == 1;
     public bool IsSettingsTabActive => _activeTabIndex == 2;
-    public bool IsLogTabActive => _activeTabIndex == 3;
     public IBrush TransferTabBg => IsTransferTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush HistoryTabBg => IsHistoryTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush SettingsTabBg => IsSettingsTabActive ? NavActiveBg : NavInactiveBg;
-    public IBrush LogTabBg => IsLogTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush TransferTabFg => IsTransferTabActive ? NavActiveFg : NavInactiveFg;
     public IBrush HistoryTabFg => IsHistoryTabActive ? NavActiveFg : NavInactiveFg;
     public IBrush SettingsTabFg => IsSettingsTabActive ? NavActiveFg : NavInactiveFg;
-    public IBrush LogTabFg => IsLogTabActive ? NavActiveFg : NavInactiveFg;
 
     public bool IsTransferPanelExpanded
     {
@@ -404,6 +407,57 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsLinuxPlatform => OperatingSystem.IsLinux();
+
+    // --- Mobile & Browser Companion Web Portal ---
+    public bool IsWebPortalRunning
+    {
+        get => _isWebPortalRunning;
+        private set
+        {
+            if (SetProperty(ref _isWebPortalRunning, value))
+            {
+                OnPropertyChanged(nameof(WebPortalToggleText));
+                OnPropertyChanged(nameof(WebPortalShortToggleText));
+                OnPropertyChanged(nameof(WebPortalStatusBrush));
+            }
+        }
+    }
+
+    public string WebPortalToggleText => IsWebPortalRunning ? "Stop Phone / Web Portal" : "Start Phone / Web Portal";
+    public string WebPortalShortToggleText => IsWebPortalRunning ? "Phone ✓" : "Phone / Web";
+    public IBrush WebPortalStatusBrush => IsWebPortalRunning ? ServerOnlineBrush : ServerOfflineBrush;
+
+    public string WebPortalUrl
+    {
+        get => _webPortalUrl;
+        private set
+        {
+            if (SetProperty(ref _webPortalUrl, value))
+                RegenerateQrBitmap();
+        }
+    }
+
+    public string WebPortalStatusText
+    {
+        get => _webPortalStatusText;
+        private set => SetProperty(ref _webPortalStatusText, value);
+    }
+
+    public bool WebPortalQrIncludePin
+    {
+        get => _webPortalQrIncludePin;
+        set
+        {
+            if (SetProperty(ref _webPortalQrIncludePin, value))
+                RegenerateQrBitmap();
+        }
+    }
+
+    public WriteableBitmap? WebPortalQrBitmap
+    {
+        get => _webPortalQrBitmap;
+        private set => SetProperty(ref _webPortalQrBitmap, value);
+    }
 
     public bool ShowHiddenFiles
     {
@@ -1264,8 +1318,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public RelayCommand ShowTransferTabCommand { get; }
     public RelayCommand ShowHistoryTabCommand { get; }
     public RelayCommand ShowSettingsTabCommand { get; }
-    public RelayCommand ShowLogTabCommand { get; }
     public RelayCommand ToggleHiddenFilesCommand { get; }
+    public AsyncRelayCommand ToggleWebPortalCommand { get; }
     public RelayCommand TogglePinLocalCommand { get; }
     public AsyncRelayCommand TogglePinRemoteCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
@@ -1373,6 +1427,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         };
         UpdateInstallerStatusText();
 
+        _webPortal = new WebPortalServer(_server);
+        _webPortal.Log += AppendLog;
+        _webPortal.TextReceived += OnServerTextReceived;
+        _webPortal.StatsChanged += () => Dispatcher.UIThread.Post(UpdateWebPortalStatusText);
+
         _discovery = new PeerDiscoveryService(
             serverOpts.ServerId,
             _settings.DiscoveryPort,
@@ -1400,7 +1459,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ShowTransferTabCommand = new RelayCommand(() => ActiveTabIndex = 0);
         ShowHistoryTabCommand = new RelayCommand(() => ActiveTabIndex = 1);
         ShowSettingsTabCommand = new RelayCommand(() => ActiveTabIndex = 2);
-        ShowLogTabCommand = new RelayCommand(() => ActiveTabIndex = 3);
+        ToggleWebPortalCommand = new AsyncRelayCommand(ToggleWebPortalAsync);
         ToggleHiddenFilesCommand = new RelayCommand(() => ShowHiddenFiles = !ShowHiddenFiles);
         TogglePinLocalCommand = new RelayCommand(TogglePinLocal, () => CanGoUpLocal);
         TogglePinRemoteCommand = new AsyncRelayCommand(() => { TogglePinRemote(); return Task.CompletedTask; }, () => IsConnected && RemotePath != FileShareServer.DrivesVirtualPath);
@@ -1822,6 +1881,97 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         InstallerStatusText = $"{_installerServer.Artifacts.Summary}{dlPart}";
     }
 
+    private async Task ToggleWebPortalAsync()
+    {
+        if (IsWebPortalRunning)
+        {
+            await _webPortal.StopAsync();
+            IsWebPortalRunning = false;
+            UpdateWebPortalStatusText();
+            WebPortalQrBitmap = null;
+        }
+        else
+        {
+            try
+            {
+                _webPortal.Start();
+                IsWebPortalRunning = true;
+                RefreshLocalInterfaces();
+                UpdateWebPortalStatusText();
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Failed to start Phone / Web Portal: {ex.Message}");
+                ConnectionError = $"Phone / Web Portal error: {ex.Message}";
+            }
+        }
+    }
+
+    private void UpdateWebPortalStatusText()
+    {
+        if (!IsWebPortalRunning)
+        {
+            WebPortalStatusText = "Off — scan QR from any phone or browser";
+            return;
+        }
+
+        string stats = (_webPortal.UploadedCount > 0 || _webPortal.DownloadedCount > 0)
+            ? $" • {_webPortal.UploadedCount}↑ {_webPortal.DownloadedCount}↓"
+            : string.Empty;
+        WebPortalStatusText = $"Live on port {_webPortal.ListeningPort}{stats}";
+    }
+
+    private void RegenerateQrBitmap()
+    {
+        if (!IsWebPortalRunning || string.IsNullOrWhiteSpace(WebPortalUrl))
+        {
+            WebPortalQrBitmap = null;
+            return;
+        }
+
+        try
+        {
+            string targetUrl = WebPortalQrIncludePin && _settings.RequirePin
+                ? $"{WebPortalUrl}/?qr={_webPortal.QrLoginToken}"
+                : WebPortalUrl;
+
+            bool[,] matrix = QrCodeEncoder.Encode(targetUrl);
+            int modules = matrix.GetLength(0);
+            const int quiet = 4;
+            const int scale = 6;
+            int pxSize = (modules + quiet * 2) * scale;
+
+            var wb = new WriteableBitmap(new PixelSize(pxSize, pxSize), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Opaque);
+            using (var fb = wb.Lock())
+            {
+                unsafe
+                {
+                    byte* ptr = (byte*)fb.Address;
+                    for (int y = 0; y < pxSize; y++)
+                    {
+                        int my = y / scale - quiet;
+                        for (int x = 0; x < pxSize; x++)
+                        {
+                            int mx = x / scale - quiet;
+                            bool dark = mx >= 0 && mx < modules && my >= 0 && my < modules && matrix[my, mx];
+                            int idx = (y * pxSize + x) * 4;
+                            byte c = dark ? (byte)15 : (byte)255;
+                            ptr[idx] = c;
+                            ptr[idx + 1] = dark ? (byte)23 : (byte)255;
+                            ptr[idx + 2] = dark ? (byte)42 : (byte)255;
+                            ptr[idx + 3] = 255;
+                        }
+                    }
+                }
+            }
+            WebPortalQrBitmap = wb;
+        }
+        catch
+        {
+            WebPortalQrBitmap = null;
+        }
+    }
+
     public void RefreshLocalInterfaces()
     {
         var list = NetworkInfo.GetActiveAddresses();
@@ -1845,6 +1995,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
             var bestV4 = ipv4Addrs.FirstOrDefault();
             InstallerUrl = bestV4 is not null ? $"http://{bestV4.Address}:{httpPort}" : $"http://localhost:{httpPort}";
+
+            int portalPort = _webPortal.IsRunning ? _webPortal.ListeningPort : WebPortalServer.DefaultHttpPort;
+            WebPortalUrl = bestV4 is not null ? $"http://{bestV4.Address}:{portalPort}" : $"http://localhost:{portalPort}";
         });
     }
 
@@ -2520,6 +2673,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 ConnectionError = ack.Error ?? "Could not deliver text snippet.";
                 return;
             }
+            _webPortal.SetHostSharedText(text);
             ShareTextInput = string.Empty;
             AppendLog($"Sent text snippet ({text.Length} chars) to {_connectedPeer?.DeviceName ?? "peer"}.");
             ShowToast("Text snippet sent");
@@ -3089,6 +3243,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await _transferManager.DisposeAsync();
         await _browseClient.DisposeAsync();
         await _discovery.DisposeAsync();
+        await _webPortal.DisposeAsync();
         await _installerServer.DisposeAsync();
         await _server.DisposeAsync();
     }

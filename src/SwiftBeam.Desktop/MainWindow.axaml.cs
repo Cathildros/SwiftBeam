@@ -855,6 +855,22 @@ public partial class MainWindow : Window
         ViewModel.ShowToast("Received text copied to clipboard");
     }
 
+    private void OnOpenWebPortalFlyoutClick(object? sender, RoutedEventArgs e)
+    {
+        var btn = this.FindControl<Button>("WebPortalPillButton");
+        var flyout = btn is null ? null : FlyoutBase.GetAttachedFlyout(btn) as Flyout;
+        if (btn is not null && flyout is not null)
+            flyout.ShowAt(btn);
+    }
+
+    private async void OnCopyWebPortalUrlClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || Clipboard is null || string.IsNullOrWhiteSpace(ViewModel.WebPortalUrl))
+            return;
+        await Clipboard.SetTextAsync(ViewModel.WebPortalUrl);
+        ViewModel.ShowToast("Phone & Web Portal URL copied to clipboard");
+    }
+
     // --- Linux App Menu & Desktop Self-Install ---
     private void OnLinuxSelfInstallClick(object? sender, RoutedEventArgs e)
     {

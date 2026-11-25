@@ -12,6 +12,7 @@ public partial class App : Application
     internal static SingleInstanceGuard? InstanceGuard { get; set; }
 
     private TrayIcon? _trayIcon;
+    private WindowsTrayIcon? _windowsTrayIcon;
     private bool _isExplicitExit;
 
     public override void Initialize()
@@ -58,52 +59,52 @@ public partial class App : Application
                 }
             };
 
-            // Cross-platform System Tray icon (Windows & Linux)
-            try
+            // Cross-platform System Tray icon (Windows pill popup + Linux native tray)
+            if (OperatingSystem.IsWindows())
             {
-                var openItem = new NativeMenuItem("Open SwiftBeam");
-                openItem.Click += (_, _) => ShowMainWindow(win);
-
-                var copyPinItem = new NativeMenuItem("Copy Pairing PIN");
-                copyPinItem.Click += async (_, _) =>
+                try
                 {
-                    if (win.Clipboard is not null)
-                        await win.Clipboard.SetTextAsync(vm.HostPin);
-                };
+                    _windowsTrayIcon = new WindowsTrayIcon(vm.TrayTooltipText);
+                    _windowsTrayIcon.LeftClicked += () =>
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => ShowMainWindow(win));
+                    _windowsTrayIcon.RightClicked += (x, y) =>
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                            TrayMenuWindow.ShowAt(
+                                x,
+                                y,
+                                vm,
+                                appIcon,
+                                () => ShowMainWindow(win),
+                                async () =>
+                                {
+                                    if (win.Clipboard is not null)
+                                        await win.Clipboard.SetTextAsync(vm.HostPin);
+                                    vm.ShowToast("Pairing PIN copied to clipboard");
+                                },
+                                () =>
+                                {
+                                    _isExplicitExit = true;
+                                    desktop.Shutdown();
+                                }));
 
-                var exitItem = new NativeMenuItem("Exit SwiftBeam");
-                exitItem.Click += (_, _) =>
+                    vm.PropertyChanged += (_, e) =>
+                    {
+                        if (e.PropertyName == nameof(MainWindowViewModel.TrayTooltipText)
+                            && OperatingSystem.IsWindows()
+                            && _windowsTrayIcon is not null)
+                        {
+                            _windowsTrayIcon.SetTooltip(vm.TrayTooltipText);
+                        }
+                    };
+                }
+                catch
                 {
-                    _isExplicitExit = true;
-                    desktop.Shutdown();
-                };
-
-                var menu = new NativeMenu();
-                menu.Items.Add(openItem);
-                menu.Items.Add(copyPinItem);
-                menu.Items.Add(new NativeMenuItemSeparator());
-                menu.Items.Add(exitItem);
-
-                _trayIcon = new TrayIcon
-                {
-                    ToolTipText = vm.TrayTooltipText,
-                    Menu = menu,
-                    IsVisible = true
-                };
-                if (appIcon is not null)
-                    _trayIcon.Icon = appIcon;
-
-                _trayIcon.Clicked += (_, _) => ShowMainWindow(win);
-
-                vm.PropertyChanged += (_, e) =>
-                {
-                    if (e.PropertyName == nameof(MainWindowViewModel.TrayTooltipText) && _trayIcon is not null)
-                        _trayIcon.ToolTipText = vm.TrayTooltipText;
-                };
+                    InitFallbackAvaloniaTray(desktop, win, vm, appIcon);
+                }
             }
-            catch
+            else
             {
-                // Non-fatal on headless/minimal Linux WMs without system tray support
+                InitFallbackAvaloniaTray(desktop, win, vm, appIcon);
             }
 
             if (startMinimized)
@@ -145,12 +146,64 @@ public partial class App : Application
             desktop.ShutdownRequested += async (_, _) =>
             {
                 InstanceGuard?.Dispose();
+                if (OperatingSystem.IsWindows())
+                    _windowsTrayIcon?.Dispose();
                 _trayIcon?.Dispose();
                 await vm.DisposeAsync();
             };
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private void InitFallbackAvaloniaTray(IClassicDesktopStyleApplicationLifetime desktop, Window win, MainWindowViewModel vm, WindowIcon? appIcon)
+    {
+        try
+        {
+            var openItem = new NativeMenuItem("Open SwiftBeam");
+            openItem.Click += (_, _) => ShowMainWindow(win);
+
+            var copyPinItem = new NativeMenuItem("Copy Pairing PIN");
+            copyPinItem.Click += async (_, _) =>
+            {
+                if (win.Clipboard is not null)
+                    await win.Clipboard.SetTextAsync(vm.HostPin);
+            };
+
+            var exitItem = new NativeMenuItem("Exit SwiftBeam");
+            exitItem.Click += (_, _) =>
+            {
+                _isExplicitExit = true;
+                desktop.Shutdown();
+            };
+
+            var menu = new NativeMenu();
+            menu.Items.Add(openItem);
+            menu.Items.Add(copyPinItem);
+            menu.Items.Add(new NativeMenuItemSeparator());
+            menu.Items.Add(exitItem);
+
+            _trayIcon = new TrayIcon
+            {
+                ToolTipText = vm.TrayTooltipText,
+                Menu = menu,
+                IsVisible = true
+            };
+            if (appIcon is not null)
+                _trayIcon.Icon = appIcon;
+
+            _trayIcon.Clicked += (_, _) => ShowMainWindow(win);
+
+            vm.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(MainWindowViewModel.TrayTooltipText) && _trayIcon is not null)
+                    _trayIcon.ToolTipText = vm.TrayTooltipText;
+            };
+        }
+        catch
+        {
+            // Non-fatal on headless/minimal Linux WMs without system tray support
+        }
     }
 
     private static void ShowMainWindow(Window win)

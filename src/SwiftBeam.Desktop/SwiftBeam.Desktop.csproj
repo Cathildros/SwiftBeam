@@ -16,6 +16,7 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
     <EmbeddedResource Include="Assets\SwiftBeam.png" LogicalName="SwiftBeam.png" />
+    <EmbeddedResource Include="Assets\SwiftBeam.ico" LogicalName="SwiftBeam.ico" />
   </ItemGroup>
 
   <ItemGroup>

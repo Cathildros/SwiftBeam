@@ -1348,6 +1348,96 @@ public sealed class TransferEngineTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_rootTemp, "local_ro_tree")));
     }
 
+    [Fact]
+    public void QrCodeEncoder_ProducesValidSquareMatrixWithFinderPatterns()
+    {
+        bool[,] matrix = QrCodeEncoder.Encode("http://192.168.1.50:45893/?qr=0123456789abcdef0123456789abcdef");
+        int n = matrix.GetLength(0);
+        Assert.Equal(n, matrix.GetLength(1));
+        Assert.True(n >= 21 && (n - 21) % 4 == 0);
+
+        // Verify top-left 7x7 finder outer ring & 3x3 solid center
+        for (int i = 0; i < 7; i++)
+        {
+            Assert.True(matrix[0, i]);
+            Assert.True(matrix[6, i]);
+            Assert.True(matrix[i, 0]);
+            Assert.True(matrix[i, 6]);
+        }
+        Assert.True(matrix[3, 3]);
+        Assert.False(matrix[1, 1]);
+        // Top-right & bottom-left finder centers
+        Assert.True(matrix[3, n - 4]);
+        Assert.True(matrix[n - 4, 3]);
+    }
+
+    [Fact]
+    public async Task WebPortalServer_AuthenticatesListsUploadsDownloadsZipsDeletesAndReceivesText()
+    {
+        string existingFile = Path.Combine(_shareDir, "portal_sample.txt");
+        await File.WriteAllTextAsync(existingFile, "Hello from PC");
+
+        string subFolder = Path.Combine(_shareDir, "portal_folder");
+        Directory.CreateDirectory(subFolder);
+        await File.WriteAllTextAsync(Path.Combine(subFolder, "nested.txt"), "Zip payload");
+
+        await using var fileServer = CreateServer(pin: "135790", requirePin: true, allowUnencrypted: true);
+        fileServer.Start();
+
+        await using var webPortal = new WebPortalServer(fileServer, port: 0);
+        string? receivedText = null;
+        webPortal.TextReceived += (_, txt) => receivedText = txt;
+        webPortal.Start();
+
+        var handler = new HttpClientHandler { UseCookies = true, UseProxy = false };
+        using var http = new HttpClient(handler) { BaseAddress = new Uri($"http://127.0.0.1:{webPortal.ListeningPort}") };
+
+        // Unauthenticated /api/list rejected with 401
+        var unauth = await http.GetAsync("/api/list");
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, unauth.StatusCode);
+
+        // Authenticate with wrong PIN -> 401, then right PIN -> 200
+        var badAuth = await http.PostAsync("/api/auth", new StringContent("{\"pin\":\"000000\"}", System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, badAuth.StatusCode);
+
+        var okAuth = await http.PostAsync("/api/auth", new StringContent("{\"pin\":\"135790\"}", System.Text.Encoding.UTF8, "application/json"));
+        okAuth.EnsureSuccessStatusCode();
+
+        // List directory
+        string listJson = await http.GetStringAsync("/api/list");
+        Assert.Contains("portal_sample.txt", listJson);
+
+        // Upload file via raw POST stream
+        byte[] uploadBytes = "Uploaded from phone browser!"u8.ToArray();
+        using var uploadContent = new ByteArrayContent(uploadBytes);
+        var upResp = await http.PostAsync("/api/upload?dir=&name=phone_upload.txt", uploadContent);
+        upResp.EnsureSuccessStatusCode();
+        string uploadedDest = Path.Combine(_shareDir, "phone_upload.txt");
+        Assert.Equal(uploadBytes, await File.ReadAllBytesAsync(uploadedDest));
+
+        // Download file back
+        byte[] downloaded = await http.GetByteArrayAsync("/api/download?path=phone_upload.txt");
+        Assert.Equal(uploadBytes, downloaded);
+
+        // Download folder as zip
+        byte[] zipBytes = await http.GetByteArrayAsync("/api/download-zip?path=portal_folder");
+        using (var ms = new MemoryStream(zipBytes))
+        using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read))
+        {
+            Assert.Contains(zip.Entries, e => e.FullName.EndsWith("nested.txt"));
+        }
+
+        // Send text snippet
+        var txtResp = await http.PostAsync("/api/text", new StringContent("{\"text\":\"Check this link\",\"senderName\":\"iPhone\"}", System.Text.Encoding.UTF8, "application/json"));
+        txtResp.EnsureSuccessStatusCode();
+        Assert.Equal("Check this link", receivedText);
+
+        // Delete uploaded file
+        var delResp = await http.PostAsync("/api/delete", new StringContent("{\"path\":\"phone_upload.txt\"}", System.Text.Encoding.UTF8, "application/json"));
+        delResp.EnsureSuccessStatusCode();
+        Assert.False(File.Exists(uploadedDest));
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }

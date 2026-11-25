@@ -32,15 +32,12 @@
             <Button Content="File Transfer" Classes="nav" Padding="10,4" FontSize="11.5"
                     Background="{Binding TransferTabBg}" Foreground="{Binding TransferTabFg}"
                     Command="{Binding ShowTransferTabCommand}"/>
-            <Button Content="History" Classes="nav" Padding="10,4" FontSize="11.5"
+            <Button Content="History &amp; Log" Classes="nav" Padding="10,4" FontSize="11.5"
                     Background="{Binding HistoryTabBg}" Foreground="{Binding HistoryTabFg}"
                     Command="{Binding ShowHistoryTabCommand}"/>
             <Button Content="Host &amp; Settings" Classes="nav" Padding="10,4" FontSize="11.5"
                     Background="{Binding SettingsTabBg}" Foreground="{Binding SettingsTabFg}"
                     Command="{Binding ShowSettingsTabCommand}"/>
-            <Button Content="Activity Log" Classes="nav" Padding="10,4" FontSize="11.5"
-                    Background="{Binding LogTabBg}" Foreground="{Binding LogTabFg}"
-                    Command="{Binding ShowLogTabCommand}"/>
           </StackPanel>
         </Border>
 
@@ -320,6 +317,48 @@
             </Button>
           </Border>
 
+          <Button x:Name="WebPortalPillButton" Classes="subtle" CornerRadius="9"
+                  Padding="10,5" FontSize="11.5"
+                  Click="OnOpenWebPortalFlyoutClick"
+                  ToolTip.Tip="Share &amp; receive files/photos from any Phone or Web Browser via QR code">
+            <FlyoutBase.AttachedFlyout>
+              <Flyout Placement="BottomEdgeAlignedRight" FlyoutPresenterClasses="swift-popover">
+                <StackPanel Width="290" Spacing="10">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                      <Ellipse Width="8" Height="8" Fill="{Binding WebPortalStatusBrush}" VerticalAlignment="Center"/>
+                      <TextBlock Text="Phone &amp; Browser Portal" FontSize="12.5" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="{Binding WebPortalToggleText}" Classes="primary" CornerRadius="8"
+                            Padding="10,4" FontSize="11" Command="{Binding ToggleWebPortalCommand}"/>
+                  </Grid>
+
+                  <TextBlock Text="{Binding WebPortalStatusText}" FontSize="11.5" Foreground="#94A3B8" TextWrapping="Wrap"/>
+
+                  <Border IsVisible="{Binding IsWebPortalRunning}" Background="White" CornerRadius="10" Padding="8" HorizontalAlignment="Center">
+                    <Image Source="{Binding WebPortalQrBitmap}" Width="168" Height="168"/>
+                  </Border>
+
+                  <CheckBox IsVisible="{Binding IsWebPortalRunning}" IsChecked="{Binding WebPortalQrIncludePin}"
+                            Content="Include 1-tap login inside QR code" FontSize="11.5"/>
+
+                  <Border IsVisible="{Binding IsWebPortalRunning}" Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="8" Padding="9,6">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <SelectableTextBlock Grid.Column="0" Text="{Binding WebPortalUrl}" FontFamily="Consolas, Monospace" FontSize="11.5"
+                                           Foreground="#A78BFA" VerticalAlignment="Center"/>
+                      <Button Grid.Column="1" Content="Copy" Classes="subtle" CornerRadius="7" Padding="8,3" FontSize="11"
+                              Click="OnCopyWebPortalUrlClick"/>
+                    </Grid>
+                  </Border>
+                </StackPanel>
+              </Flyout>
+            </FlyoutBase.AttachedFlyout>
+            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+              <Ellipse Width="7" Height="7" Fill="{Binding WebPortalStatusBrush}" VerticalAlignment="Center"/>
+              <TextBlock Text="{Binding WebPortalShortToggleText}" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Button>
+
           <Button Content="{Binding InstallerToggleShortText}" Classes="primary" CornerRadius="9"
                   Padding="10,5" FontSize="11.5"
                   Command="{Binding ToggleInstallerServerCommand}"
@@ -451,10 +490,10 @@
             IsVisible="{Binding IsTransferTabActive}"
             RowDefinitions="*,6,210">
 
-          <!-- ROW 0: Dual-Pane Side-by-Side File Manager (Local Left | Remote Right) -->
-          <Grid Grid.Row="0" ColumnDefinitions="*,10,*">
+          <!-- ROW 0: Dual-Pane Resizable Side-by-Side File Manager (Local Left | Remote Right) -->
+          <Grid Grid.Row="0" ColumnDefinitions="*,8,*">
             <!-- LEFT PANE: THIS COMPUTER (LOCAL) -->
-            <Border Grid.Column="0" Classes="card" Padding="10,8">
+            <Border Grid.Column="0" MinWidth="340" Classes="card" Padding="10,8">
               <Grid RowDefinitions="Auto,6,Auto,5,Auto,4,Auto,2,*">
                 <!-- Header: Computer badge + Send button on right edge (mirrored with Remote Pull!) -->
                 <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
@@ -714,8 +753,10 @@
               </Grid>
             </Border>
 
+            <GridSplitter Grid.Column="1" Classes="swift-splitter" ResizeDirection="Columns"/>
+
             <!-- RIGHT PANE: REMOTE COMPUTER -->
-            <Border Grid.Column="2" Classes="card" Padding="10,8">
+            <Border Grid.Column="2" MinWidth="340" Classes="card" Padding="10,8">
               <Grid RowDefinitions="Auto,6,Auto,5,Auto,4,Auto,2,*">
                 <!-- Header: Pull button on left edge (mirrored with Local Send!) + Remote badge -->
                 <Grid Grid.Row="0" ColumnDefinitions="Auto,10,*">
@@ -985,7 +1026,7 @@
           <!-- Resizable Splitter (only when Transfer Queue is expanded) -->
           <GridSplitter Grid.Row="1"
                         IsVisible="{Binding IsTransferPanelExpanded}"
-                        Background="#1E293B" ResizeDirection="Rows" CornerRadius="2"/>
+                        Classes="swift-splitter" ResizeDirection="Rows"/>
 
           <!-- ROW 2: Collapsible Unified Parallel Transfer Queue (Pull + Send) -->
           <Border Grid.Row="2" Classes="card" Padding="10,7">
@@ -1112,49 +1153,77 @@
           </Border>
       </Grid>
 
-      <!-- VIEW 2: Transfer History -->
-      <Border IsVisible="{Binding IsHistoryTabActive}" Classes="card" Padding="14">
-        <Grid RowDefinitions="Auto,10,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,12,240,8,Auto">
-            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-              <TextBlock Text="Persistent Transfer History" FontSize="15" FontWeight="Bold" Foreground="#F8FAFC"/>
-              <TextBlock Text="Recent completed and failed transfers across sessions (up to 500 entries)" FontSize="11.5" Foreground="#94A3B8"/>
-            </StackPanel>
-            <TextBox Grid.Column="2" Classes="pill" Text="{Binding HistorySearchFilter}" Watermark="Filter by file or computer..." MinHeight="32"/>
-            <Button Grid.Column="4" Content="Clear History" Classes="subtle" CornerRadius="8" Padding="12,6" Command="{Binding ClearHistoryCommand}"/>
-          </Grid>
+      <!-- VIEW 2: Unified History & Activity Log (Resizable Split) -->
+      <Grid IsVisible="{Binding IsHistoryTabActive}" ColumnDefinitions="1.35*,8,*">
+        <Border Grid.Column="0" MinWidth="380" Classes="card" Padding="14">
+          <Grid RowDefinitions="Auto,10,*">
+            <Grid Grid.Row="0" ColumnDefinitions="*,12,210,8,Auto">
+              <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                <TextBlock Text="Persistent Transfer History" FontSize="15" FontWeight="Bold" Foreground="#F8FAFC"/>
+                <TextBlock Text="Recent completed &amp; failed transfers across sessions (up to 500)" FontSize="11.5" Foreground="#94A3B8"/>
+              </StackPanel>
+              <TextBox Grid.Column="2" Classes="pill" Text="{Binding HistorySearchFilter}" Watermark="Filter history..." MinHeight="32"/>
+              <Button Grid.Column="4" Content="Clear History" Classes="subtle" CornerRadius="8" Padding="11,6" Command="{Binding ClearHistoryCommand}"/>
+            </Grid>
 
-          <Grid Grid.Row="2">
-            <ListBox ItemsSource="{Binding FilteredHistory}"
-                     Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="8">
-              <ListBox.ItemTemplate>
-                <DataTemplate x:DataType="vm:TransferHistoryItemViewModel">
-                  <Border Background="#111827" BorderBrush="#1F2937" BorderThickness="1" CornerRadius="8" Padding="10,7" Margin="0,2">
-                    <Grid ColumnDefinitions="72,*,120,90,90,140,Auto">
-                      <Border Grid.Column="0" Background="#1E293B" CornerRadius="5" Padding="6,2" HorizontalAlignment="Left" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding DirectionBadge}" FontSize="10" FontWeight="Bold" Foreground="{Binding DirectionBrush}"/>
-                      </Border>
-                      <StackPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding FileName}" FontSize="12.5" FontWeight="SemiBold" Foreground="#F8FAFC" TextTrimming="CharacterEllipsis"/>
-                        <TextBlock Text="{Binding PeerName}" FontSize="10.5" Foreground="#94A3B8" TextTrimming="CharacterEllipsis"/>
-                      </StackPanel>
-                      <TextBlock Grid.Column="2" Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold" Foreground="{Binding StatusBrush}" VerticalAlignment="Center"/>
-                      <TextBlock Grid.Column="3" Text="{Binding SizeText}" FontSize="11" Foreground="#CBD5E1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                      <TextBlock Grid.Column="4" Text="{Binding AvgSpeedText}" FontSize="11" Foreground="#34D399" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                      <TextBlock Grid.Column="5" Text="{Binding TimestampText}" FontSize="11" Foreground="#64748B" VerticalAlignment="Center"/>
-                      <Button Grid.Column="6" Content="Open Folder" Classes="subtle" Padding="8,3" FontSize="10.5"
-                              IsVisible="{Binding CanOpenFolder}" Click="OnOpenHistoryFolderClick"/>
-                    </Grid>
-                  </Border>
-                </DataTemplate>
-              </ListBox.ItemTemplate>
-            </ListBox>
-            <TextBlock Text="No transfer history recorded yet."
-                       IsVisible="{Binding HasNoHistoryEntries}"
-                       Foreground="#64748B" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Grid Grid.Row="2">
+              <ListBox ItemsSource="{Binding FilteredHistory}"
+                       Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="8">
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="vm:TransferHistoryItemViewModel">
+                    <Border Background="#111827" BorderBrush="#1F2937" BorderThickness="1" CornerRadius="8" Padding="10,7" Margin="0,2">
+                      <Grid ColumnDefinitions="72,*,105,82,82,132,Auto">
+                        <Border Grid.Column="0" Background="#1E293B" CornerRadius="5" Padding="6,2" HorizontalAlignment="Left" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding DirectionBadge}" FontSize="10" FontWeight="Bold" Foreground="{Binding DirectionBrush}"/>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding FileName}" FontSize="12.5" FontWeight="SemiBold" Foreground="#F8FAFC" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Text="{Binding PeerName}" FontSize="10.5" Foreground="#94A3B8" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="2" Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold" Foreground="{Binding StatusBrush}" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="3" Text="{Binding SizeText}" FontSize="11" Foreground="#CBD5E1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <TextBlock Grid.Column="4" Text="{Binding AvgSpeedText}" FontSize="11" Foreground="#34D399" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <TextBlock Grid.Column="5" Text="{Binding TimestampText}" FontSize="10.5" Foreground="#64748B" VerticalAlignment="Center"/>
+                        <Button Grid.Column="6" Content="Open Folder" Classes="subtle" Padding="8,3" FontSize="10.5"
+                                IsVisible="{Binding CanOpenFolder}" Click="OnOpenHistoryFolderClick"/>
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <TextBlock Text="No transfer history recorded yet."
+                         IsVisible="{Binding HasNoHistoryEntries}"
+                         Foreground="#64748B" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
           </Grid>
-        </Grid>
-      </Border>
+        </Border>
+
+        <GridSplitter Grid.Column="1" Classes="swift-splitter" ResizeDirection="Columns"/>
+
+        <Border Grid.Column="2" MinWidth="300" Classes="card" Padding="14">
+          <Grid RowDefinitions="Auto,10,*">
+            <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+              <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                <TextBlock Text="Session Activity Log" FontSize="15" FontWeight="Bold" Foreground="#F8FAFC"/>
+                <TextBlock Text="Live diagnostics, connections &amp; warnings" FontSize="11.5" Foreground="#94A3B8"/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                <Button Content="Copy" Classes="subtle" CornerRadius="8" Padding="9,5" FontSize="11" Click="OnCopyActivityLogClick"/>
+                <Button Content="Export..." Classes="subtle" CornerRadius="8" Padding="9,5" FontSize="11" Click="OnExportActivityLogClick"/>
+                <Button Content="Clear" Classes="subtle" CornerRadius="8" Padding="9,5" FontSize="11" Command="{Binding ClearLogCommand}"/>
+              </StackPanel>
+            </Grid>
+            <ListBox Grid.Row="2"
+                     ItemsSource="{Binding LogEntries}"
+                     Background="#0B1120"
+                     BorderBrush="#1E293B"
+                     BorderThickness="1"
+                     CornerRadius="8"
+                     FontFamily="Consolas, Monospace"
+                     FontSize="11.5"/>
+          </Grid>
+        </Border>
+      </Grid>
 
       <!-- VIEW 3: Host & Settings -->
       <ScrollViewer IsVisible="{Binding IsSettingsTabActive}">
@@ -1335,6 +1404,20 @@
                 </Border>
 
                 <Border Background="#0B1120" BorderBrush="#3B2466" BorderThickness="1" CornerRadius="10" Padding="12">
+                  <StackPanel Spacing="6">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel>
+                        <TextBlock Text="Phone &amp; Browser Companion Portal (QR Code)" FontSize="13" FontWeight="SemiBold" Foreground="#C4B5FD"/>
+                        <TextBlock Text="{Binding WebPortalStatusText}" FontSize="11" Foreground="#94A3B8"/>
+                      </StackPanel>
+                      <Button Grid.Column="1" Content="{Binding WebPortalToggleText}" Classes="primary" CornerRadius="8" Padding="11,5" FontSize="11"
+                              Command="{Binding ToggleWebPortalCommand}"/>
+                    </Grid>
+                    <SelectableTextBlock IsVisible="{Binding IsWebPortalRunning}" Text="{Binding WebPortalUrl}" FontFamily="Consolas, Monospace" FontSize="11.5" Foreground="#A78BFA"/>
+                  </StackPanel>
+                </Border>
+
+                <Border Background="#0B1120" BorderBrush="#3B2466" BorderThickness="1" CornerRadius="10" Padding="12">
                   <StackPanel Spacing="8">
                     <Grid ColumnDefinitions="*,Auto">
                       <StackPanel>
@@ -1361,28 +1444,6 @@
             </Border>
           </Grid>
       </ScrollViewer>
-
-      <!-- VIEW 4: Activity Log -->
-      <Border IsVisible="{Binding IsLogTabActive}" Classes="card" Padding="12">
-        <Grid RowDefinitions="Auto,8,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
-            <TextBlock Grid.Column="0" Text="Session Activity Log" FontSize="14" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
-              <Button Content="Copy Log" Classes="subtle" CornerRadius="8" Padding="10,5" FontSize="11.5" Click="OnCopyActivityLogClick"/>
-              <Button Content="Export Log..." Classes="subtle" CornerRadius="8" Padding="10,5" FontSize="11.5" Click="OnExportActivityLogClick"/>
-              <Button Content="Clear Log" Classes="subtle" CornerRadius="8" Padding="10,5" FontSize="11.5" Command="{Binding ClearLogCommand}"/>
-            </StackPanel>
-          </Grid>
-          <ListBox Grid.Row="2"
-                   ItemsSource="{Binding LogEntries}"
-                   Background="#0B1120"
-                   BorderBrush="#1E293B"
-                   BorderThickness="1"
-                   CornerRadius="6"
-                   FontFamily="Consolas, Monospace"
-                   FontSize="12"/>
-        </Grid>
-      </Border>
 
       <!-- Completion / Action Toast Notification -->
       <Border IsVisible="{Binding IsToastVisible}"

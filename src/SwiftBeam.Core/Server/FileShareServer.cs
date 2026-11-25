@@ -677,7 +677,7 @@ public sealed class FileShareServer : IAsyncDisposable
         }
     }
 
-    private static (string? Home, string? Desktop, string? Downloads, string? Documents) GetStandardLocations()
+    internal static (string? Home, string? Desktop, string? Downloads, string? Documents) GetStandardLocations()
     {
         static string? Clean(string? p) =>
             !string.IsNullOrWhiteSpace(p) && Directory.Exists(p) ? p.Replace('\\', '/').TrimEnd('/') : null;
@@ -689,7 +689,7 @@ public sealed class FileShareServer : IAsyncDisposable
         return (home, desktop, downloads, documents);
     }
 
-    private bool TryResolveSafePath(string relativePath, out string fullPath, out string normalizedPath)
+    internal bool TryResolveSafePath(string relativePath, out string fullPath, out string normalizedPath)
     {
         fullPath = string.Empty;
         normalizedPath = string.Empty;
@@ -799,7 +799,7 @@ public sealed class FileShareServer : IAsyncDisposable
         }
     }
 
-    private ListDirResponseMessage HandleListDir(ListDirRequestMessage req)
+    internal ListDirResponseMessage HandleListDir(ListDirRequestMessage req)
     {
         if (!TryResolveSafePath(req.RelativePath, out string targetDir, out string normalizedPath))
             return new ListDirResponseMessage(req.RelativePath, [], "Access denied: invalid path.");
