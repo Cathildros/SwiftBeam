@@ -32,6 +32,9 @@
             <Button Content="File Transfer" Classes="nav" Padding="10,4" FontSize="11.5"
                     Background="{Binding TransferTabBg}" Foreground="{Binding TransferTabFg}"
                     Command="{Binding ShowTransferTabCommand}"/>
+            <Button Content="{Binding AutoSyncTabLabel}" Classes="nav" Padding="10,4" FontSize="11.5"
+                    Background="{Binding AutoSyncTabBg}" Foreground="{Binding AutoSyncTabFg}"
+                    Command="{Binding ShowAutoSyncTabCommand}"/>
             <Button Content="History &amp; Log" Classes="nav" Padding="10,4" FontSize="11.5"
                     Background="{Binding HistoryTabBg}" Foreground="{Binding HistoryTabFg}"
                     Command="{Binding ShowHistoryTabCommand}"/>
@@ -1153,7 +1156,97 @@
           </Border>
       </Grid>
 
-      <!-- VIEW 2: Unified History & Activity Log (Resizable Split) -->
+      <!-- VIEW 2: Live Folder Auto-Sync -->
+      <Border IsVisible="{Binding IsAutoSyncTabActive}" Classes="card" Padding="14">
+        <Grid RowDefinitions="Auto,12,*">
+          <Grid Grid.Row="0" ColumnDefinitions="*,12,Auto">
+            <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+              <TextBlock Text="Live Two-Way Auto-Sync Folders" FontSize="16" FontWeight="Bold" Foreground="#F8FAFC"/>
+              <TextBlock Text="Continuously mirrors added, edited, and deleted files between paired folders on both computers (safe deletion tracking + offline catch-up)."
+                         FontSize="11.5" Foreground="#94A3B8" TextWrapping="Wrap"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+              <Button Content="+ Pair Current Folders" Classes="primary" CornerRadius="8" Padding="12,6" FontSize="11.5"
+                      IsEnabled="{Binding CanPairCurrentFolders}"
+                      Click="OnPairCurrentFoldersClick"
+                      ToolTip.Tip="Pair the currently open Local and Remote folders for live auto-sync"/>
+              <Button Content="+ New Sync Pair..." Classes="subtle" CornerRadius="8" Padding="11,6" FontSize="11.5"
+                      Click="OnAddAutoSyncPairClick"/>
+              <Button Content="Sync All Now" Classes="subtle" CornerRadius="8" Padding="11,6" FontSize="11.5"
+                      Command="{Binding SyncAllAutoSyncPairsCommand}"/>
+            </StackPanel>
+          </Grid>
+
+          <Grid Grid.Row="2">
+            <ScrollViewer>
+              <ItemsControl ItemsSource="{Binding AutoSyncPairs}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:AutoSyncPairItemViewModel">
+                    <Border Background="#0B1120" BorderBrush="#1E293B" BorderThickness="1" CornerRadius="12" Padding="14,12" Margin="0,0,0,8">
+                      <Grid RowDefinitions="Auto,6,Auto,8,Auto" ColumnDefinitions="*,12,Auto">
+                        <!-- Title & Badges -->
+                        <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                          <Ellipse Width="9" Height="9" Fill="{Binding StatusBrush}" VerticalAlignment="Center"/>
+                          <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/>
+                          <Border Background="#2E1065" CornerRadius="6" Padding="7,2" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding ModeBadge}" FontSize="10" FontWeight="Bold" Foreground="#DDD6FE"/>
+                          </Border>
+                          <Border Background="#1E293B" CornerRadius="6" Padding="7,2" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding DeletesBadge}" FontSize="10" Foreground="#CBD5E1"/>
+                          </Border>
+                        </StackPanel>
+
+                        <!-- Action Pills -->
+                        <StackPanel Grid.Row="0" Grid.Column="2" Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                          <Button Content="Sync Now" Classes="primary" CornerRadius="7" Padding="10,4" FontSize="11"
+                                  IsEnabled="{Binding IsEnabled}" Click="OnSyncPairNowClick"/>
+                          <Button Content="{Binding ToggleEnabledText}" Classes="subtle" CornerRadius="7" Padding="9,4" FontSize="11"
+                                  Click="OnToggleAutoSyncPairClick"/>
+                          <Button Content="Edit" Classes="subtle" CornerRadius="7" Padding="9,4" FontSize="11"
+                                  Click="OnEditAutoSyncPairClick"/>
+                          <Button Content="Open Folder" Classes="subtle" CornerRadius="7" Padding="9,4" FontSize="11"
+                                  Click="OnOpenAutoSyncLocalFolderClick"/>
+                          <Button Content="Remove" Classes="danger" CornerRadius="7" Padding="9,4" FontSize="11"
+                                  Click="OnRemoveAutoSyncPairClick"/>
+                        </StackPanel>
+
+                        <!-- Local <-> Remote Paths -->
+                        <StackPanel Grid.Row="2" Grid.ColumnSpan="3" Spacing="2">
+                          <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="LOCAL:" FontSize="10.5" FontWeight="Bold" Foreground="#64748B" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding LocalPath}" FontFamily="Consolas, Monospace" FontSize="11.5" Foreground="#E2E8F0" TextTrimming="CharacterEllipsis"/>
+                          </StackPanel>
+                          <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="REMOTE:" FontSize="10.5" FontWeight="Bold" Foreground="#64748B" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding RemoteSummary}" FontFamily="Consolas, Monospace" FontSize="11.5" Foreground="#A78BFA" TextTrimming="CharacterEllipsis"/>
+                          </StackPanel>
+                        </StackPanel>
+
+                        <!-- Live Status & Counters -->
+                        <Grid Grid.Row="4" Grid.ColumnSpan="3" ColumnDefinitions="*,Auto">
+                          <TextBlock Grid.Column="0" Text="{Binding StatusText}" FontSize="11.5" Foreground="#94A3B8" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Grid.Column="1" Text="{Binding CountersText}" FontSize="11" FontWeight="SemiBold" Foreground="#34D399"/>
+                        </Grid>
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+
+            <!-- Empty state -->
+            <StackPanel IsVisible="{Binding HasNoAutoSyncPairs}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" MaxWidth="440">
+              <TextBlock Text="No auto-sync folder pairs yet" FontSize="15" FontWeight="Bold" Foreground="#F8FAFC" HorizontalAlignment="Center"/>
+              <TextBlock Text="Connect to a computer and click '+ Pair Current Folders' (or '+ New Sync Pair...') to continuously keep a shared folder in sync on both PCs — including additions, edits, and deletions."
+                         FontSize="12" Foreground="#94A3B8" TextWrapping="Wrap" TextAlignment="Center"/>
+              <Button Content="+ New Sync Pair..." Classes="primary" CornerRadius="9" Padding="14,7" Margin="0,4,0,0"
+                      HorizontalAlignment="Center" Click="OnAddAutoSyncPairClick"/>
+            </StackPanel>
+          </Grid>
+        </Grid>
+      </Border>
+
+      <!-- VIEW 3: Unified History & Activity Log (Resizable Split) -->
       <Grid IsVisible="{Binding IsHistoryTabActive}" ColumnDefinitions="1.35*,8,*">
         <Border Grid.Column="0" MinWidth="380" Classes="card" Padding="14">
           <Grid RowDefinitions="Auto,10,*">

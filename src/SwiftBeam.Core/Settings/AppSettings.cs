@@ -31,6 +31,33 @@ public sealed class PinnedFolderEntry
     public string Path { get; set; } = string.Empty;
 }
 
+public enum AutoSyncMode
+{
+    TwoWay = 0,
+    SendOnly = 1,
+    ReceiveOnly = 2
+}
+
+public sealed class AutoSyncPairConfig
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N")[..12];
+    public string Name { get; set; } = string.Empty;
+    public string LocalPath { get; set; } = string.Empty;
+    public string RemotePath { get; set; } = string.Empty;
+    public string PeerDeviceName { get; set; } = string.Empty;
+    public string PeerHost { get; set; } = string.Empty;
+    public int PeerPort { get; set; } = ProtocolConstants.DefaultTransferPort;
+    public bool PeerUseTls { get; set; } = true;
+    public string PeerPin { get; set; } = string.Empty;
+    public AutoSyncMode Mode { get; set; } = AutoSyncMode.TwoWay;
+    public bool Enabled { get; set; } = true;
+    public bool SyncDeletes { get; set; } = true;
+    public bool UseSoftTrash { get; set; } = true;
+    public bool IncludeHidden { get; set; } = false;
+    public int PollIntervalSeconds { get; set; } = 5;
+    public string IgnorePatterns { get; set; } = "*.tmp;*.part;*.sbpart;*.sbwebpart;*.sbsyncpart;Thumbs.db;.DS_Store;desktop.ini;.swiftbeam-trash";
+}
+
 public sealed class AppSettings
 {
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -62,6 +89,7 @@ public sealed class AppSettings
     public List<PinnedFolderEntry> PinnedLocalFolders { get; set; } = [];
     public Dictionary<string, List<PinnedFolderEntry>> PinnedRemoteFoldersByPeer { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<SavedPeerEntry> SavedPeers { get; set; } = [];
+    public List<AutoSyncPairConfig> AutoSyncPairs { get; set; } = [];
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -87,6 +115,12 @@ public sealed class AppSettings
     {
         string dir = Path.GetDirectoryName(GetSettingsFilePath()) ?? AppDomain.CurrentDomain.BaseDirectory;
         return Path.Combine(dir, "history.json");
+    }
+
+    public static string GetSyncStateDirectory()
+    {
+        string dir = Path.GetDirectoryName(GetSettingsFilePath()) ?? AppDomain.CurrentDomain.BaseDirectory;
+        return Path.Combine(dir, "sync-state");
     }
 
     public static string GetDefaultShareDir()
@@ -185,6 +219,15 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(UpdateRepo))
             UpdateRepo = "Cathildros/SwiftBeam";
         SavedPeers ??= [];
+        AutoSyncPairs ??= [];
+        foreach (var pair in AutoSyncPairs)
+        {
+            if (string.IsNullOrWhiteSpace(pair.Id))
+                pair.Id = Guid.NewGuid().ToString("N")[..12];
+            if (pair.PeerPort is < 1024 or > 65535)
+                pair.PeerPort = ProtocolConstants.DefaultTransferPort;
+            pair.PollIntervalSeconds = Math.Clamp(pair.PollIntervalSeconds, 2, 300);
+        }
     }
 
     public void UpsertSavedPeer(string deviceName, string host, int port, bool useTls, string? pinToRemember)

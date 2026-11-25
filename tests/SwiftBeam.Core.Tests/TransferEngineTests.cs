@@ -5,6 +5,7 @@ using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Security;
 using SwiftBeam.Core.Server;
 using SwiftBeam.Core.Settings;
+using SwiftBeam.Core.Sync;
 using SwiftBeam.Core.Updates;
 using Xunit;
 
@@ -1522,6 +1523,125 @@ public sealed class TransferEngineTests : IDisposable
             if (headerEnd >= 0 && len >= headerEnd + contentLen)
                 return System.Text.Encoding.ASCII.GetString(data, 0, headerEnd + contentLen);
         }
+    }
+
+    [Fact]
+    public void AutoSyncEngine_ThreeWayDiff_HandlesAddEditDeleteEditVsDeleteAndConflicts()
+    {
+        var t0 = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        var t1 = t0.AddMinutes(5);
+        var t2 = t0.AddMinutes(6);
+
+        var baseline = new AutoSyncSnapshot
+        {
+            Files = new Dictionary<string, SyncFileRecord>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["deleted_remote.txt"] = new(100, t0),
+                ["deleted_local.txt"] = new(200, t0),
+                ["conflict.txt"] = new(300, t0),
+                ["edited_vs_deleted.txt"] = new(400, t0),
+                ["unchanged.txt"] = new(50, t0)
+            }
+        };
+
+        var localFiles = new Dictionary<string, SyncFileRecord>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["added_local.txt"] = new(11, t1),
+            ["deleted_remote.txt"] = new(100, t0),       // unchanged local, missing remote => delete local
+            ["conflict.txt"] = new(310, t1),             // changed both => ConflictKeepBothDownloadRemote
+            ["edited_vs_deleted.txt"] = new(450, t1),    // edited locally after remote deleted => upload
+            ["unchanged.txt"] = new(50, t0)
+        };
+
+        var remoteFiles = new Dictionary<string, (string RemoteFullPath, SyncFileRecord Record)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["added_remote.txt"] = ("remote/added_remote.txt", new(22, t1)),
+            ["deleted_local.txt"] = ("remote/deleted_local.txt", new(200, t0)), // missing local, unchanged remote => delete remote
+            ["conflict.txt"] = ("remote/conflict.txt", new(320, t2)),
+            ["unchanged.txt"] = ("remote/unchanged.txt", new(50, t0))
+        };
+
+        var cfg = new AutoSyncPairConfig { Mode = AutoSyncMode.TwoWay, SyncDeletes = true };
+        var plan = AutoSyncEngine.ComputePlan(
+            @"C:\local", "remote",
+            localFiles, new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            remoteFiles, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            baseline, cfg);
+
+        Assert.Equal(1, plan.IdenticalCount);
+        Assert.Contains(plan.Actions, a => a.RelativePath == "added_local.txt" && a.Kind == AutoSyncActionKind.UploadFile);
+        Assert.Contains(plan.Actions, a => a.RelativePath == "added_remote.txt" && a.Kind == AutoSyncActionKind.DownloadFile);
+        Assert.Contains(plan.Actions, a => a.RelativePath == "deleted_remote.txt" && a.Kind == AutoSyncActionKind.DeleteLocalFile);
+        Assert.Contains(plan.Actions, a => a.RelativePath == "deleted_local.txt" && a.Kind == AutoSyncActionKind.DeleteRemoteFile);
+        Assert.Contains(plan.Actions, a => a.RelativePath == "edited_vs_deleted.txt" && a.Kind == AutoSyncActionKind.UploadFile);
+        Assert.Contains(plan.Actions, a => a.RelativePath == "conflict.txt" && a.Kind == AutoSyncActionKind.ConflictKeepBothDownloadRemote);
+    }
+
+    [Fact]
+    public async Task AutoSyncManager_LiveTwoWaySync_MirrorsAdditionsEditsDeletionsAndSoftTrash()
+    {
+        string localSyncDir = Path.Combine(_rootTemp, "sync_local");
+        string remoteSyncDir = Path.Combine(_shareDir, "sync_remote");
+        string stateDir = Path.Combine(_rootTemp, "sync_state");
+        Directory.CreateDirectory(localSyncDir);
+        Directory.CreateDirectory(remoteSyncDir);
+
+        await File.WriteAllTextAsync(Path.Combine(localSyncDir, "from_local.txt"), "hello from local");
+        await File.WriteAllTextAsync(Path.Combine(localSyncDir, "scratch.tmp"), "ignored temp file");
+        await File.WriteAllTextAsync(Path.Combine(remoteSyncDir, "from_remote.txt"), "hello from remote");
+
+        await using var server = CreateServer(pin: "246810", requirePin: true, allowUnencrypted: true);
+        server.Start();
+
+        var pair = new AutoSyncPairConfig
+        {
+            Id = "pair1",
+            Name = "Test Pair",
+            LocalPath = localSyncDir,
+            RemotePath = "sync_remote",
+            PeerHost = "127.0.0.1",
+            PeerPort = server.ListeningPort,
+            PeerUseTls = true,
+            PeerPin = "246810",
+            Mode = AutoSyncMode.TwoWay,
+            SyncDeletes = true,
+            UseSoftTrash = true,
+            PollIntervalSeconds = 30
+        };
+
+        await using var manager = new AutoSyncManager(
+            cfg => new ConnectionTarget(cfg.PeerHost, cfg.PeerPort, cfg.PeerPin, cfg.PeerUseTls, "TestSyncClient"),
+            stateDir,
+            useCompression: false,
+            verifySha256: true);
+
+        manager.LoadPairs([pair]);
+        await manager.TriggerSyncNowAsync("pair1");
+
+        // 1. Initial sync mirrored both additions and skipped *.tmp
+        Assert.True(File.Exists(Path.Combine(remoteSyncDir, "from_local.txt")));
+        Assert.False(File.Exists(Path.Combine(remoteSyncDir, "scratch.tmp")));
+        Assert.True(File.Exists(Path.Combine(localSyncDir, "from_remote.txt")));
+        Assert.Equal("hello from remote", await File.ReadAllTextAsync(Path.Combine(localSyncDir, "from_remote.txt")));
+
+        // 2. Edit remote file & delete local file -> updates local & deletes remote
+        await Task.Delay(50);
+        string remFromRemote = Path.Combine(remoteSyncDir, "from_remote.txt");
+        await File.WriteAllTextAsync(remFromRemote, "updated remote content!");
+        File.SetLastWriteTimeUtc(remFromRemote, DateTime.UtcNow.AddSeconds(10));
+        File.Delete(Path.Combine(localSyncDir, "from_local.txt"));
+
+        await manager.TriggerSyncNowAsync("pair1");
+        Assert.Equal("updated remote content!", await File.ReadAllTextAsync(Path.Combine(localSyncDir, "from_remote.txt")));
+        Assert.False(File.Exists(Path.Combine(remoteSyncDir, "from_local.txt")));
+
+        // 3. Delete remote file -> soft-trashes local copy into .swiftbeam-trash
+        File.Delete(remFromRemote);
+        await manager.TriggerSyncNowAsync("pair1");
+        Assert.False(File.Exists(Path.Combine(localSyncDir, "from_remote.txt")));
+        string trashDir = Path.Combine(localSyncDir, ".swiftbeam-trash");
+        Assert.True(Directory.Exists(trashDir));
+        Assert.NotEmpty(Directory.GetFiles(trashDir, "from_remote.txt", SearchOption.AllDirectories));
     }
 
     public void Dispose()

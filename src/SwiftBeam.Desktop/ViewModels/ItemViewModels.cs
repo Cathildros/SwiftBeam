@@ -3,6 +3,7 @@ using SwiftBeam.Core.Client;
 using SwiftBeam.Core.Discovery;
 using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Settings;
+using SwiftBeam.Core.Sync;
 
 namespace SwiftBeam.Desktop.ViewModels;
 
@@ -362,5 +363,79 @@ public sealed class TransferHistoryItemViewModel
             TransferStatus.Failed => SolidColorBrush.Parse("#EF4444"),
             _ => SolidColorBrush.Parse("#94A3B8")
         };
+    }
+}
+
+public sealed class AutoSyncPairItemViewModel : ObservableObject
+{
+    private AutoSyncPairStatus _status;
+
+    public AutoSyncPairConfig Config { get; }
+    public string Id => Config.Id;
+    public string Name => string.IsNullOrWhiteSpace(Config.Name) ? Config.LocalPath : Config.Name;
+    public bool IsEnabled => Config.Enabled;
+    public string ToggleEnabledText => Config.Enabled ? "Pause" : "Resume";
+    public string LocalPath => Config.LocalPath;
+
+    public string ModeBadge => Config.Mode switch
+    {
+        AutoSyncMode.TwoWay => "TWO-WAY ⇄",
+        AutoSyncMode.SendOnly => "SEND ONLY →",
+        AutoSyncMode.ReceiveOnly => "← RECEIVE ONLY",
+        _ => "SYNC"
+    };
+
+    public string DeletesBadge => !Config.SyncDeletes
+        ? "Keep Deleted"
+        : Config.UseSoftTrash ? "Deletes -> Soft Trash" : "Deletes Mirrored";
+
+    public string RemoteSummary
+    {
+        get
+        {
+            string peer = string.IsNullOrWhiteSpace(Config.PeerDeviceName) ? $"{Config.PeerHost}:{Config.PeerPort}" : $"{Config.PeerDeviceName} ({Config.PeerHost})";
+            string remote = string.IsNullOrWhiteSpace(Config.RemotePath) ? "<Shared Root>" : Config.RemotePath;
+            return $"{peer}  •  {remote}";
+        }
+    }
+
+    public string StatusText => _status.StatusText;
+    public string CountersText => $"{_status.SentCount} sent • {_status.ReceivedCount} received • {_status.DeletedCount} deleted";
+    public IBrush StatusBrush => _status.State switch
+    {
+        AutoSyncRunState.Watching => SolidColorBrush.Parse("#10B981"),
+        AutoSyncRunState.Syncing => SolidColorBrush.Parse("#8B5CF6"),
+        AutoSyncRunState.WaitingForPeer => SolidColorBrush.Parse("#F59E0B"),
+        AutoSyncRunState.Error => SolidColorBrush.Parse("#EF4444"),
+        _ => SolidColorBrush.Parse("#64748B")
+    };
+
+    public AutoSyncPairItemViewModel(AutoSyncPairConfig config, AutoSyncPairStatus? initialStatus = null)
+    {
+        Config = config;
+        _status = initialStatus ?? new AutoSyncPairStatus(
+            config.Id,
+            config.Enabled ? AutoSyncRunState.Idle : AutoSyncRunState.Paused,
+            config.Enabled ? "Starting..." : "Paused",
+            0, 0, 0, 0, null, null);
+    }
+
+    public void UpdateStatus(AutoSyncPairStatus status)
+    {
+        _status = status;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(CountersText));
+        OnPropertyChanged(nameof(StatusBrush));
+    }
+
+    public void RefreshConfig()
+    {
+        OnPropertyChanged(nameof(Name));
+        OnPropertyChanged(nameof(IsEnabled));
+        OnPropertyChanged(nameof(ToggleEnabledText));
+        OnPropertyChanged(nameof(LocalPath));
+        OnPropertyChanged(nameof(ModeBadge));
+        OnPropertyChanged(nameof(DeletesBadge));
+        OnPropertyChanged(nameof(RemoteSummary));
     }
 }

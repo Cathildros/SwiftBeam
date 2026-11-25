@@ -342,7 +342,7 @@ public partial class MainWindow : Window
     private void OnOpenHostSettingsFromMenuClick(object? sender, RoutedEventArgs e)
     {
         if (ViewModel is null) return;
-        ViewModel.ActiveTabIndex = 2;
+        ViewModel.ShowSettingsTabCommand.Execute(null);
         GetHostMenuFlyout()?.Hide();
     }
 
@@ -1179,6 +1179,63 @@ public partial class MainWindow : Window
     {
         if (ViewModel is null || !ViewModel.IsConnected) return;
         await SyncFolderDialog.ShowSyncAsync(this, ViewModel);
+    }
+
+    private async void OnPairCurrentFoldersClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var draft = ViewModel.CreateDefaultPairFromCurrentFolders();
+        var saved = await AutoSyncPairDialog.ShowEditAsync(this, ViewModel, draft, isNew: true);
+        if (saved is not null)
+            await ViewModel.SaveAutoSyncPairAsync(saved);
+    }
+
+    private async void OnAddAutoSyncPairClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var draft = ViewModel.CreateDefaultPairFromCurrentFolders();
+        var saved = await AutoSyncPairDialog.ShowEditAsync(this, ViewModel, draft, isNew: true);
+        if (saved is not null)
+            await ViewModel.SaveAutoSyncPairAsync(saved);
+    }
+
+    private async void OnEditAutoSyncPairClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || sender is not Button { DataContext: AutoSyncPairItemViewModel item }) return;
+        var updated = await AutoSyncPairDialog.ShowEditAsync(this, ViewModel, item.Config, isNew: false);
+        if (updated is not null)
+            await ViewModel.SaveAutoSyncPairAsync(updated);
+    }
+
+    private async void OnSyncPairNowClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || sender is not Button { DataContext: AutoSyncPairItemViewModel item }) return;
+        await ViewModel.SyncPairNowAsync(item.Id);
+    }
+
+    private async void OnToggleAutoSyncPairClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || sender is not Button { DataContext: AutoSyncPairItemViewModel item }) return;
+        await ViewModel.ToggleAutoSyncPairAsync(item.Id);
+    }
+
+    private void OnOpenAutoSyncLocalFolderClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: AutoSyncPairItemViewModel item } && Directory.Exists(item.LocalPath))
+            OpenPathInOsShell(item.LocalPath, revealInFolder: false);
+    }
+
+    private async void OnRemoveAutoSyncPairClick(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || sender is not Button { DataContext: AutoSyncPairItemViewModel item }) return;
+        bool confirmed = await InputDialog.ShowConfirmAsync(
+            this,
+            "Remove Auto-Sync Pair",
+            $"Stop auto-syncing '{item.Name}'? Your existing files on both computers will remain untouched.",
+            confirmLabel: "Remove Pair",
+            isPrimaryConfirm: false);
+        if (confirmed)
+            await ViewModel.RemoveAutoSyncPairAsync(item.Id);
     }
 
     private void OnOpenHistoryFolderClick(object? sender, RoutedEventArgs e)

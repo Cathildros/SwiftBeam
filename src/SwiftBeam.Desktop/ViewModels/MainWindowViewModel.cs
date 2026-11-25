@@ -12,6 +12,7 @@ using SwiftBeam.Core.Protocol;
 using SwiftBeam.Core.Security;
 using SwiftBeam.Core.Server;
 using SwiftBeam.Core.Settings;
+using SwiftBeam.Core.Sync;
 using SwiftBeam.Core.SystemIntegration;
 using SwiftBeam.Core.Updates;
 
@@ -25,6 +26,7 @@ public enum ConnectPopoverStep
 }
 
 public readonly record struct ConnectAttemptResult(bool Success, bool IsAuthError, string? Error);
+public readonly record struct ConnectedPeerSnapshot(string DeviceName, string Host, int Port, bool UseTls, string Pin);
 
 public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
@@ -35,6 +37,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private readonly PeerDiscoveryService _discovery;
     private readonly TransferClient _browseClient = new();
     private readonly TransferManager _transferManager = new();
+    private readonly AutoSyncManager _autoSyncManager;
     private readonly SleepInhibitor _sleepInhibitor = new();
     private readonly Dictionary<string, TransferItemViewModel> _transferMap = new();
     private readonly List<TransferHistoryItemViewModel> _allHistoryItems = [];
@@ -50,7 +53,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private static readonly IBrush NavActiveFg = Brushes.White;
     private static readonly IBrush NavInactiveFg = SolidColorBrush.Parse("#94A3B8");
 
-    private int _activeTabIndex; // 0 = File Transfer, 1 = History, 2 = Host & Settings, 3 = Activity Log
+    private int _activeTabIndex; // 0 = File Transfer, 1 = Auto-Sync, 2 = History & Log, 3 = Host & Settings
     private bool _isTransferPanelExpanded = true;
     private bool _isServerRunning;
     private bool _isInstallerServerRunning;
@@ -157,6 +160,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ObservableCollection<TransferItemViewModel> Transfers { get; } = [];
     public ObservableCollection<TransferHistoryItemViewModel> FilteredHistory { get; } = [];
     public ObservableCollection<string> LogEntries { get; } = [];
+    public ObservableCollection<AutoSyncPairItemViewModel> AutoSyncPairs { get; } = [];
 
     // --- Header Navigation & Collapsible Transfer Drawer ---
     public int ActiveTabIndex
@@ -167,12 +171,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             if (SetProperty(ref _activeTabIndex, value))
             {
                 OnPropertyChanged(nameof(IsTransferTabActive));
+                OnPropertyChanged(nameof(IsAutoSyncTabActive));
                 OnPropertyChanged(nameof(IsHistoryTabActive));
                 OnPropertyChanged(nameof(IsSettingsTabActive));
                 OnPropertyChanged(nameof(TransferTabBg));
+                OnPropertyChanged(nameof(AutoSyncTabBg));
                 OnPropertyChanged(nameof(HistoryTabBg));
                 OnPropertyChanged(nameof(SettingsTabBg));
                 OnPropertyChanged(nameof(TransferTabFg));
+                OnPropertyChanged(nameof(AutoSyncTabFg));
                 OnPropertyChanged(nameof(HistoryTabFg));
                 OnPropertyChanged(nameof(SettingsTabFg));
             }
@@ -180,14 +187,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public bool IsTransferTabActive => _activeTabIndex == 0;
-    public bool IsHistoryTabActive => _activeTabIndex == 1;
-    public bool IsSettingsTabActive => _activeTabIndex == 2;
+    public bool IsAutoSyncTabActive => _activeTabIndex == 1;
+    public bool IsHistoryTabActive => _activeTabIndex == 2;
+    public bool IsSettingsTabActive => _activeTabIndex == 3;
     public IBrush TransferTabBg => IsTransferTabActive ? NavActiveBg : NavInactiveBg;
+    public IBrush AutoSyncTabBg => IsAutoSyncTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush HistoryTabBg => IsHistoryTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush SettingsTabBg => IsSettingsTabActive ? NavActiveBg : NavInactiveBg;
     public IBrush TransferTabFg => IsTransferTabActive ? NavActiveFg : NavInactiveFg;
+    public IBrush AutoSyncTabFg => IsAutoSyncTabActive ? NavActiveFg : NavInactiveFg;
     public IBrush HistoryTabFg => IsHistoryTabActive ? NavActiveFg : NavInactiveFg;
     public IBrush SettingsTabFg => IsSettingsTabActive ? NavActiveFg : NavInactiveFg;
+    public string AutoSyncTabLabel => _settings.AutoSyncPairs.Count(p => p.Enabled) is int active && active > 0
+        ? $"Auto-Sync ({active})"
+        : "Auto-Sync";
+    public bool HasNoAutoSyncPairs => AutoSyncPairs.Count == 0;
 
     public bool IsTransferPanelExpanded
     {
@@ -1022,6 +1036,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(ConnectedPeerShortName));
                 OnPropertyChanged(nameof(RemoteHasFullFs));
                 OnPropertyChanged(nameof(CanGoUpRemote));
+                OnPropertyChanged(nameof(CanPairCurrentFolders));
                 PullSelectedCommand.RaiseCanExecuteChanged();
                 SendSelectedCommand.RaiseCanExecuteChanged();
                 SendSharedTextCommand.RaiseCanExecuteChanged();
@@ -1069,6 +1084,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(CanGoUpLocal));
                 OnPropertyChanged(nameof(IsCurrentLocalPinned));
                 OnPropertyChanged(nameof(LocalPinIcon));
+                OnPropertyChanged(nameof(CanPairCurrentFolders));
                 GoUpLocalCommand.RaiseCanExecuteChanged();
                 TogglePinLocalCommand.RaiseCanExecuteChanged();
             }
@@ -1147,6 +1163,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(CanGoUpRemote));
                 OnPropertyChanged(nameof(IsCurrentRemotePinned));
                 OnPropertyChanged(nameof(RemotePinIcon));
+                OnPropertyChanged(nameof(CanPairCurrentFolders));
                 GoUpRemoteCommand.RaiseCanExecuteChanged();
                 TogglePinRemoteCommand.RaiseCanExecuteChanged();
             }
@@ -1317,8 +1334,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     // --- Commands ---
     public RelayCommand ShowTransferTabCommand { get; }
+    public RelayCommand ShowAutoSyncTabCommand { get; }
     public RelayCommand ShowHistoryTabCommand { get; }
     public RelayCommand ShowSettingsTabCommand { get; }
+    public AsyncRelayCommand SyncAllAutoSyncPairsCommand { get; }
     public RelayCommand ToggleHiddenFilesCommand { get; }
     public AsyncRelayCommand ToggleWebPortalCommand { get; }
     public RelayCommand TogglePinLocalCommand { get; }
@@ -1453,13 +1472,31 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _transferManager.QueueReordered += OnTransferQueueReordered;
         _transferManager.TelemetryUpdated += OnTelemetryUpdated;
 
+        _autoSyncManager = new AutoSyncManager(
+            ResolveAutoSyncTarget,
+            AppSettings.GetSyncStateDirectory(),
+            _settings.UseSmartCompression,
+            _settings.VerifySha256OnComplete);
+        _autoSyncManager.Log += AppendLog;
+        _autoSyncManager.StatusChanged += OnAutoSyncStatusChanged;
+        _autoSyncManager.FolderSynced += OnAutoSyncFolderSynced;
+
         ReloadSavedPeersCollection();
         ReloadPinnedLocalFolders();
         LoadHistoryEntries();
 
+        _autoSyncManager.LoadPairs(_settings.AutoSyncPairs);
+        ReloadAutoSyncPairsCollection();
+
         ShowTransferTabCommand = new RelayCommand(() => ActiveTabIndex = 0);
-        ShowHistoryTabCommand = new RelayCommand(() => ActiveTabIndex = 1);
-        ShowSettingsTabCommand = new RelayCommand(() => ActiveTabIndex = 2);
+        ShowAutoSyncTabCommand = new RelayCommand(() => ActiveTabIndex = 1);
+        ShowHistoryTabCommand = new RelayCommand(() => ActiveTabIndex = 2);
+        ShowSettingsTabCommand = new RelayCommand(() => ActiveTabIndex = 3);
+        SyncAllAutoSyncPairsCommand = new AsyncRelayCommand(async () =>
+        {
+            await _autoSyncManager.TriggerSyncAllAsync();
+            ShowToast("Synced all active folder pairs");
+        });
         ToggleWebPortalCommand = new AsyncRelayCommand(ToggleWebPortalAsync);
         ToggleHiddenFilesCommand = new RelayCommand(() => ShowHiddenFiles = !ShowHiddenFiles);
         TogglePinLocalCommand = new RelayCommand(TogglePinLocal, () => CanGoUpLocal);
@@ -2925,6 +2962,162 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    // --- Live Auto-Sync Folder Pairs ---
+    public bool CanPairCurrentFolders =>
+        IsConnected &&
+        !string.IsNullOrEmpty(LocalPath) &&
+        LocalPath != FileShareServer.DrivesVirtualPath &&
+        RemotePath != FileShareServer.DrivesVirtualPath;
+
+    public ConnectedPeerSnapshot? GetCurrentConnectedPeerSnapshot()
+    {
+        if (!IsConnected || _lastConnectionTarget is null || _connectedPeer is null)
+            return null;
+        return new ConnectedPeerSnapshot(
+            _connectedPeer.DeviceName,
+            _lastConnectionTarget.Host,
+            _lastConnectionTarget.Port,
+            _lastConnectionTarget.UseTls,
+            _lastConnectionTarget.Pin);
+    }
+
+    public AutoSyncPairConfig CreateDefaultPairFromCurrentFolders()
+    {
+        var conn = GetCurrentConnectedPeerSnapshot();
+        string localDir = (!string.IsNullOrEmpty(LocalPath) && LocalPath != FileShareServer.DrivesVirtualPath && Directory.Exists(LocalPath))
+            ? LocalPath
+            : _settings.DownloadDirectory;
+        string remoteDir = (IsConnected && RemotePath != FileShareServer.DrivesVirtualPath)
+            ? RemotePath
+            : string.Empty;
+        string defaultName = Path.GetFileName(localDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(defaultName))
+            defaultName = "Synced Folder";
+
+        return new AutoSyncPairConfig
+        {
+            Name = conn is not null ? $"{defaultName} ⇄ {conn.Value.DeviceName}" : defaultName,
+            LocalPath = localDir,
+            RemotePath = remoteDir,
+            PeerDeviceName = conn?.DeviceName ?? string.Empty,
+            PeerHost = conn?.Host ?? string.Empty,
+            PeerPort = conn?.Port ?? ProtocolConstants.DefaultTransferPort,
+            PeerUseTls = conn?.UseTls ?? _settings.PreferTls,
+            PeerPin = conn?.Pin ?? string.Empty,
+            Mode = IsRemoteReadOnly ? AutoSyncMode.ReceiveOnly : AutoSyncMode.TwoWay
+        };
+    }
+
+    public async Task SaveAutoSyncPairAsync(AutoSyncPairConfig updated)
+    {
+        int idx = _settings.AutoSyncPairs.FindIndex(p => p.Id.Equals(updated.Id, StringComparison.OrdinalIgnoreCase));
+        if (idx >= 0)
+            _settings.AutoSyncPairs[idx] = updated;
+        else
+            _settings.AutoSyncPairs.Add(updated);
+
+        _settings.Save();
+        await _autoSyncManager.UpsertPairAsync(updated);
+        ReloadAutoSyncPairsCollection();
+        AppendLog($"Saved auto-sync folder pair '{updated.Name}' ({updated.Mode}).");
+        ShowToast($"Auto-Sync pair '{updated.Name}' saved");
+    }
+
+    public async Task RemoveAutoSyncPairAsync(string pairId)
+    {
+        var existing = _settings.AutoSyncPairs.FirstOrDefault(p => p.Id.Equals(pairId, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+            _settings.AutoSyncPairs.Remove(existing);
+        _settings.Save();
+        await _autoSyncManager.RemovePairAsync(pairId, deleteSnapshot: true);
+        ReloadAutoSyncPairsCollection();
+        ShowToast("Removed auto-sync pair");
+    }
+
+    public async Task ToggleAutoSyncPairAsync(string pairId)
+    {
+        var existing = _settings.AutoSyncPairs.FirstOrDefault(p => p.Id.Equals(pairId, StringComparison.OrdinalIgnoreCase));
+        if (existing is null) return;
+        existing.Enabled = !existing.Enabled;
+        _settings.Save();
+        await _autoSyncManager.UpsertPairAsync(existing);
+        ReloadAutoSyncPairsCollection();
+        ShowToast(existing.Enabled ? $"Resumed '{existing.Name}'" : $"Paused '{existing.Name}'");
+    }
+
+    public Task SyncPairNowAsync(string pairId)
+    {
+        ShowToast("Syncing folder pair...");
+        return _autoSyncManager.TriggerSyncNowAsync(pairId);
+    }
+
+    private void ReloadAutoSyncPairsCollection()
+    {
+        AutoSyncPairs.Clear();
+        foreach (var pair in _settings.AutoSyncPairs)
+            AutoSyncPairs.Add(new AutoSyncPairItemViewModel(pair, _autoSyncManager.GetStatus(pair.Id)));
+        OnPropertyChanged(nameof(HasNoAutoSyncPairs));
+        OnPropertyChanged(nameof(AutoSyncTabLabel));
+    }
+
+    private ConnectionTarget ResolveAutoSyncTarget(AutoSyncPairConfig cfg)
+    {
+        string host = cfg.PeerHost;
+        int port = cfg.PeerPort > 0 ? cfg.PeerPort : ProtocolConstants.DefaultTransferPort;
+        bool useTls = cfg.PeerUseTls;
+        string pin = cfg.PeerPin;
+
+        // If a nearby peer matches by device name, prefer its current LAN/Direct IP (handles DHCP IP changes)
+        if (!string.IsNullOrWhiteSpace(cfg.PeerDeviceName))
+        {
+            var livePeer = DiscoveredPeers.FirstOrDefault(p => p.DeviceName.Equals(cfg.PeerDeviceName, StringComparison.OrdinalIgnoreCase));
+            var liveEp = livePeer?.Endpoints.FirstOrDefault();
+            if (liveEp is not null)
+            {
+                host = liveEp.Host;
+                port = liveEp.Port;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(pin))
+        {
+            var saved = SavedPeers.FirstOrDefault(s =>
+                (!string.IsNullOrWhiteSpace(cfg.PeerDeviceName) && s.DeviceName.Equals(cfg.PeerDeviceName, StringComparison.OrdinalIgnoreCase)) ||
+                s.Host.Equals(host, StringComparison.OrdinalIgnoreCase));
+            if (saved is not null)
+                pin = saved.SavedPin;
+        }
+
+        return new ConnectionTarget(host, port, pin, useTls, _settings.DeviceName);
+    }
+
+    private void OnAutoSyncStatusChanged(AutoSyncPairStatus status)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            var vm = AutoSyncPairs.FirstOrDefault(p => p.Id.Equals(status.PairId, StringComparison.OrdinalIgnoreCase));
+            vm?.UpdateStatus(status);
+        });
+    }
+
+    private void OnAutoSyncFolderSynced(string localPath, string remotePath)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (string.Equals(Path.GetFullPath(LocalPath), Path.GetFullPath(localPath), StringComparison.OrdinalIgnoreCase) &&
+                !_allLocalEntries.Any(e => e.IsSelected))
+            {
+                LoadLocalDirectory(LocalPath);
+            }
+            if (IsConnected && !string.IsNullOrEmpty(RemotePath) &&
+                RemotePath.Replace('\\', '/').TrimEnd('/').Equals(remotePath.Replace('\\', '/').TrimEnd('/'), StringComparison.OrdinalIgnoreCase) &&
+                !_allRemoteEntries.Any(e => e.IsSelected))
+            {
+                _ = LoadRemoteDirectoryAsync(RemotePath);
+            }
+        });
+    }
+
     private void LoadHistoryEntries()
     {
         _allHistoryItems.Clear();
@@ -3246,6 +3439,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         SavePendingQueueSafe();
         _sleepInhibitor.Dispose();
+        await _autoSyncManager.DisposeAsync();
         await _transferManager.DisposeAsync();
         await _browseClient.DisposeAsync();
         await _discovery.DisposeAsync();

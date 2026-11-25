@@ -1194,7 +1194,7 @@ public sealed class FileShareServer : IAsyncDisposable
             string? sha256 = null;
             if (req.IncludeSha256)
             {
-                await using var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 256 * 1024, FileOptions.SequentialScan | FileOptions.Asynchronous);
+                await using var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 256 * 1024, FileOptions.SequentialScan | FileOptions.Asynchronous);
                 byte[] hash = await SHA256.HashDataAsync(fs, ct).ConfigureAwait(false);
                 sha256 = Convert.ToHexString(hash).ToLowerInvariant();
             }
@@ -1234,7 +1234,7 @@ public sealed class FileShareServer : IAsyncDisposable
                 try { existing.Handle.Dispose(); } catch { }
             }
 
-            var opened = File.OpenHandle(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var opened = File.OpenHandle(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.Asynchronous | FileOptions.SequentialScan);
             var created = new PullHandleEntry(opened, fileSize, lastWriteTicks);
             _activePullHandles[fullPath] = created;
             return opened;
@@ -1275,7 +1275,11 @@ public sealed class FileShareServer : IAsyncDisposable
             if (requestedLen > 0)
             {
                 bool allowCompress = req.AllowCompression && CompressionHelper.ShouldCompressFile(fullPath);
-                var handle = await GetOrOpenPullHandleAsync(fullPath, fileSize, lastWriteTicks, ct).ConfigureAwait(false);
+                bool singleShotFullFile = offset == 0 && requestedLen >= fileSize;
+                SafeFileHandle? ownedHandle = singleShotFullFile
+                    ? File.OpenHandle(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.Asynchronous | FileOptions.SequentialScan)
+                    : null;
+                var handle = ownedHandle ?? await GetOrOpenPullHandleAsync(fullPath, fileSize, lastWriteTicks, ct).ConfigureAwait(false);
                 int frameBufSize = 5 + ProtocolConstants.DataFrameChunkBytes;
                 int compBufSize = 9 + ProtocolConstants.DataFrameChunkBytes;
                 byte[] bufA = ArrayPool<byte>.Shared.Rent(frameBufSize);
@@ -1325,6 +1329,7 @@ public sealed class FileShareServer : IAsyncDisposable
                     {
                         try { await pendingSend.ConfigureAwait(false); } catch { }
                     }
+                    ownedHandle?.Dispose();
                     ArrayPool<byte>.Shared.Return(bufA);
                     ArrayPool<byte>.Shared.Return(bufB);
                     if (compA is not null) ArrayPool<byte>.Shared.Return(compA);
@@ -1532,6 +1537,7 @@ public sealed class FileShareServer : IAsyncDisposable
 
             if (req.TotalFileSize == 0)
             {
+                EvictCachedHandles(fullPath);
                 await File.WriteAllBytesAsync(fullPath, Array.Empty<byte>(), ct).ConfigureAwait(false);
                 try { if (File.Exists(partPath)) File.Delete(partPath); } catch { }
                 try { File.SetLastWriteTimeUtc(fullPath, req.LastModifiedUtc); } catch { }
@@ -1551,6 +1557,7 @@ public sealed class FileShareServer : IAsyncDisposable
                     return new PushFinalizeAckMessage(false, "SHA-256 verification failed on remote host.");
             }
 
+            EvictCachedHandles(fullPath);
             File.Move(partPath, fullPath, overwrite: true);
             try { File.SetLastWriteTimeUtc(fullPath, req.LastModifiedUtc); } catch { }
             Log?.Invoke($"Received file: {Path.GetFileName(fullPath)} ({req.TotalFileSize / (1024.0 * 1024.0):0.##} MB)");
