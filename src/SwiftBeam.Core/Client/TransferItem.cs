@@ -47,6 +47,7 @@ public sealed class TransferItem : IDisposable
     };
 
     private readonly object _sync = new();
+    private readonly object _manifestSync = new();
     private ChunkState[] _chunks = [];
     private SafeFileHandle? _partHandle;
     private int _inFlightChunks;
@@ -493,22 +494,34 @@ public sealed class TransferItem : IDisposable
 
     private void SaveManifest(TransferStateManifest manifest)
     {
-        try
+        lock (_manifestSync)
         {
-            string tmp = StateFilePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(manifest, JsonOptions));
-            File.Move(tmp, StateFilePath, overwrite: true);
-        }
-        catch
-        {
-            // Non-fatal; next chunk completion will rewrite manifest
+            lock (_sync)
+            {
+                if (Status is TransferStatus.Cancelled or TransferStatus.Completed or TransferStatus.Skipped)
+                    return;
+            }
+
+            try
+            {
+                string tmp = StateFilePath + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(manifest, JsonOptions));
+                File.Move(tmp, StateFilePath, overwrite: true);
+            }
+            catch
+            {
+                // Non-fatal; next chunk completion will rewrite manifest
+            }
         }
     }
 
     internal void TryDeleteStateFile()
     {
-        try { if (File.Exists(StateFilePath)) File.Delete(StateFilePath); } catch { }
-        try { if (File.Exists(StateFilePath + ".tmp")) File.Delete(StateFilePath + ".tmp"); } catch { }
+        lock (_manifestSync)
+        {
+            try { if (File.Exists(StateFilePath)) File.Delete(StateFilePath); } catch { }
+            try { if (File.Exists(StateFilePath + ".tmp")) File.Delete(StateFilePath + ".tmp"); } catch { }
+        }
     }
 
     internal void TryDeletePartialFiles()
