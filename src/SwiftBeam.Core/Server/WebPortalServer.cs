@@ -23,6 +23,7 @@ public sealed class WebPortalServer : IAsyncDisposable
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+    private static readonly byte[] PortalHtmlBytes = Encoding.UTF8.GetBytes(PortalHtml);
 
     private readonly FileShareServer _fileServer;
     private readonly int _requestedPort;
@@ -113,6 +114,7 @@ public sealed class WebPortalServer : IAsyncDisposable
 
     private async Task HandleClientAsync(TcpClient tcpClient, CancellationToken ct)
     {
+        string remoteIp = (tcpClient.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
         using (tcpClient)
         {
             try
@@ -122,321 +124,401 @@ public sealed class WebPortalServer : IAsyncDisposable
                 tcpClient.ReceiveTimeout = 60_000;
                 await using var stream = tcpClient.GetStream();
 
-                // Loop on persistent connections only for non-upload requests; uploads close cleanly after response.
-                var parsed = await ReadHttpRequestHeadersAsync(stream, ct).ConfigureAwait(false);
-                if (parsed is null) return;
-
-                var (method, target, headers, leftover) = parsed.Value;
-                int qIdx = target.IndexOf('?');
-                string path = qIdx >= 0 ? target[..qIdx] : target;
-                string query = qIdx >= 0 ? target[(qIdx + 1)..] : string.Empty;
-                var queryParams = ParseQuery(query);
-
-                headers.TryGetValue("content-length", out string? clHeader);
-                long.TryParse(clHeader, out long contentLength);
-
-                string? cookieToken = ExtractSessionCookie(headers);
-                bool hasCookieAuth = !_fileServer.Options.RequirePin || IsValidSession(cookieToken);
-
-                // Special QR 1-tap login query token on GET /
-                string? setCookieHeader = null;
-                if (method == "GET" && path == "/" && queryParams.TryGetValue("qr", out string? qrVal) &&
-                    !string.IsNullOrEmpty(qrVal) && string.Equals(qrVal, QrLoginToken, StringComparison.Ordinal))
+                byte[] pendingBytes = [];
+                for (int reqIndex = 0; reqIndex < 100 && !ct.IsCancellationRequested; reqIndex++)
                 {
-                    string newSession = CreateSession();
-                    hasCookieAuth = true;
-                    setCookieHeader = $"sb_session={newSession}; Path=/; HttpOnly; SameSite=Lax";
-                }
+                    int idleTimeoutMs = reqIndex == 0 ? 30_000 : 15_000;
+                    var parsed = await ReadHttpRequestHeadersAsync(stream, pendingBytes, idleTimeoutMs, ct).ConfigureAwait(false);
+                    if (parsed is null) break;
 
-                if (method == "GET" && (path == "/" || path == "/index.html"))
-                {
-                    await SendBytesAsync(stream, 200, "OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(PortalHtml), ct, setCookieHeader).ConfigureAwait(false);
-                    return;
-                }
+                    var (method, target, httpVersion, headers, leftover) = parsed.Value;
+                    pendingBytes = [];
 
-                if (method == "GET" && path == "/api/status")
-                {
-                    var (home, desktop, downloads, documents) = _fileServer.Options.AllowFullFilesystem
-                        ? FileShareServer.GetStandardLocations()
-                        : (null, null, null, null);
+                    int qIdx = target.IndexOf('?');
+                    string path = qIdx >= 0 ? target[..qIdx] : target;
+                    string query = qIdx >= 0 ? target[(qIdx + 1)..] : string.Empty;
+                    var queryParams = ParseQuery(query);
 
-                    await SendJsonAsync(stream, 200, new
+                    bool hasContentLength = headers.TryGetValue("content-length", out string? clHeader);
+                    long.TryParse(clHeader, out long contentLength);
+                    bool isChunked = headers.TryGetValue("transfer-encoding", out string? teHdr) &&
+                                     teHdr.Contains("chunked", StringComparison.OrdinalIgnoreCase);
+
+                    headers.TryGetValue("connection", out string? connHdr);
+                    bool keepAlive = !isChunked && reqIndex < 99 && (httpVersion == "HTTP/1.0"
+                        ? connHdr?.Contains("keep-alive", StringComparison.OrdinalIgnoreCase) == true
+                        : connHdr?.Contains("close", StringComparison.OrdinalIgnoreCase) != true);
+
+                    if ((contentLength <= 0 && (method is "GET" or "HEAD" or "OPTIONS" || hasContentLength)) && leftover.Length > 0)
                     {
-                        authenticated = hasCookieAuth,
-                        deviceName = _fileServer.Options.DeviceName,
-                        readOnly = _fileServer.Options.ReadOnly,
-                        requirePin = _fileServer.Options.RequirePin,
-                        fullFilesystem = _fileServer.Options.AllowFullFilesystem,
-                        osPlatform = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
-                        homePath = home,
-                        desktopPath = desktop,
-                        downloadsPath = downloads,
-                        documentsPath = documents
-                    }, ct, setCookieHeader).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "POST" && path == "/api/auth")
-                {
-                    byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 64 * 1024, ct).ConfigureAwait(false);
-                    string? pin = null;
-                    string? qr = null;
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(body);
-                        if (doc.RootElement.TryGetProperty("pin", out var pEl)) pin = pEl.GetString();
-                        if (doc.RootElement.TryGetProperty("qr", out var qEl)) qr = qEl.GetString();
-                    }
-                    catch { }
-
-                    bool authorized = !_fileServer.Options.RequirePin;
-                    if (!authorized && !string.IsNullOrEmpty(qr) && string.Equals(qr, QrLoginToken, StringComparison.Ordinal))
-                        authorized = true;
-                    if (!authorized && !string.IsNullOrEmpty(pin))
-                    {
-                        string cleanPin = new(pin.Where(char.IsDigit).ToArray());
-                        authorized = string.Equals(cleanPin, _fileServer.Options.Pin, StringComparison.Ordinal);
+                        pendingBytes = leftover;
+                        leftover = [];
                     }
 
-                    if (!authorized)
+                    if (method == "OPTIONS")
                     {
-                        await SendJsonAsync(stream, 401, new { ok = false, error = "Incorrect PIN." }, ct).ConfigureAwait(false);
-                        return;
+                        await SendEmptyAsync(stream, 204, "No Content", keepAlive, ct, extraHeaders: "Allow: GET, HEAD, POST, OPTIONS\r\n").ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
                     }
 
-                    string tok = CreateSession();
-                    await SendJsonAsync(stream, 200, new { ok = true }, ct, $"sb_session={tok}; Path=/; HttpOnly; SameSite=Lax").ConfigureAwait(false);
-                    return;
-                }
-
-                // All remaining routes require session auth (when PIN is required)
-                if (!hasCookieAuth)
-                {
-                    await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
-                    await SendJsonAsync(stream, 401, new { error = "Authentication required." }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "GET" && path == "/api/list")
-                {
-                    queryParams.TryGetValue("path", out string? rawPath);
-                    bool includeHidden = queryParams.TryGetValue("hidden", out string? hid) && (hid == "1" || hid.Equals("true", StringComparison.OrdinalIgnoreCase));
-                    var resp = _fileServer.HandleListDir(new ListDirRequestMessage(rawPath ?? string.Empty, Recursive: false, IncludeHidden: includeHidden));
-                    await SendJsonAsync(stream, string.IsNullOrEmpty(resp.Error) ? 200 : 400, new
+                    if ((method is "GET" or "HEAD") && path == "/favicon.ico")
                     {
-                        currentPath = resp.CurrentPath,
-                        entries = resp.Entries,
-                        error = resp.Error,
-                        freeDiskBytes = resp.FreeDiskBytes,
-                        totalDiskBytes = resp.TotalDiskBytes,
-                        readOnly = _fileServer.Options.ReadOnly
-                    }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "GET" && path == "/api/download")
-                {
-                    queryParams.TryGetValue("path", out string? rawPath);
-                    if (!_fileServer.TryResolveSafePath(rawPath ?? string.Empty, out string fullPath, out _) || !File.Exists(fullPath))
-                    {
-                        await SendJsonAsync(stream, 404, new { error = "File not found." }, ct).ConfigureAwait(false);
-                        return;
+                        await SendEmptyAsync(stream, 204, "No Content", keepAlive, ct).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
                     }
 
-                    string fileName = Path.GetFileName(fullPath);
-                    await StreamFileDownloadAsync(stream, fullPath, fileName, "application/octet-stream", ct).ConfigureAwait(false);
-                    Interlocked.Increment(ref _downloadedCount);
-                    StatsChanged?.Invoke();
-                    Log?.Invoke($"Web/Phone downloaded: {fileName}");
-                    return;
-                }
+                    string? cookieToken = ExtractSessionCookie(headers);
+                    bool hasCookieAuth = !_fileServer.Options.RequirePin || IsValidSession(cookieToken);
 
-                if (method == "GET" && path == "/api/download-zip")
-                {
-                    queryParams.TryGetValue("path", out string? rawPath);
-                    if (!_fileServer.TryResolveSafePath(rawPath ?? string.Empty, out string fullDir, out _) ||
-                        fullDir == FileShareServer.DrivesVirtualPath || !Directory.Exists(fullDir))
+                    // Special QR 1-tap login query token on GET /
+                    string? setCookieHeader = null;
+                    if (method == "GET" && (path == "/" || path == "/index.html") &&
+                        queryParams.TryGetValue("qr", out string? qrVal) &&
+                        !string.IsNullOrEmpty(qrVal) && string.Equals(qrVal, QrLoginToken, StringComparison.Ordinal))
                     {
-                        await SendJsonAsync(stream, 404, new { error = "Folder not found." }, ct).ConfigureAwait(false);
-                        return;
+                        string newSession = CreateSession();
+                        hasCookieAuth = true;
+                        setCookieHeader = $"sb_session={newSession}; Path=/; HttpOnly; SameSite=Lax";
                     }
 
-                    string folderName = Path.GetFileName(fullDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                    if (string.IsNullOrWhiteSpace(folderName)) folderName = "SwiftBeamFolder";
-                    string tempZip = Path.Combine(Path.GetTempPath(), $"sb_zip_{Guid.NewGuid():N}.zip");
-                    try
+                    if ((method is "GET" or "HEAD") && (path == "/" || path == "/index.html"))
                     {
-                        CreateSafeZipFromDirectory(fullDir, tempZip);
-                        await StreamFileDownloadAsync(stream, tempZip, $"{folderName}.zip", "application/zip", ct).ConfigureAwait(false);
+                        if (method == "GET")
+                            Log?.Invoke($"Web/Phone connected: {remoteIp} -> {method} {path}");
+
+                        if (method == "HEAD")
+                            await SendHeadAsync(stream, 200, "OK", "text/html; charset=utf-8", PortalHtmlBytes.Length, ct, setCookieHeader, keepAlive).ConfigureAwait(false);
+                        else
+                            await SendBytesAsync(stream, 200, "OK", "text/html; charset=utf-8", PortalHtmlBytes, ct, setCookieHeader, keepAlive).ConfigureAwait(false);
+
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "GET" && path == "/api/status")
+                    {
+                        var (home, desktop, downloads, documents) = _fileServer.Options.AllowFullFilesystem
+                            ? FileShareServer.GetStandardLocations()
+                            : (null, null, null, null);
+
+                        await SendJsonAsync(stream, 200, new
+                        {
+                            authenticated = hasCookieAuth,
+                            deviceName = _fileServer.Options.DeviceName,
+                            readOnly = _fileServer.Options.ReadOnly,
+                            requirePin = _fileServer.Options.RequirePin,
+                            fullFilesystem = _fileServer.Options.AllowFullFilesystem,
+                            osPlatform = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+                            homePath = home,
+                            desktopPath = desktop,
+                            downloadsPath = downloads,
+                            documentsPath = documents
+                        }, ct, setCookieHeader, keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "POST" && path == "/api/auth")
+                    {
+                        byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 64 * 1024, ct).ConfigureAwait(false);
+                        string? pin = null;
+                        string? qr = null;
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(body);
+                            if (doc.RootElement.TryGetProperty("pin", out var pEl)) pin = pEl.GetString();
+                            if (doc.RootElement.TryGetProperty("qr", out var qEl)) qr = qEl.GetString();
+                        }
+                        catch { }
+
+                        bool authorized = !_fileServer.Options.RequirePin;
+                        if (!authorized && !string.IsNullOrEmpty(qr) && string.Equals(qr, QrLoginToken, StringComparison.Ordinal))
+                            authorized = true;
+                        if (!authorized && !string.IsNullOrEmpty(pin))
+                        {
+                            string cleanPin = new(pin.Where(char.IsDigit).ToArray());
+                            authorized = string.Equals(cleanPin, _fileServer.Options.Pin, StringComparison.Ordinal);
+                        }
+
+                        if (!authorized)
+                        {
+                            await SendJsonAsync(stream, 401, new { ok = false, error = "Incorrect PIN." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        string tok = CreateSession();
+                        await SendJsonAsync(stream, 200, new { ok = true }, ct, $"sb_session={tok}; Path=/; HttpOnly; SameSite=Lax", keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    // All remaining routes require session auth (when PIN is required)
+                    if (!hasCookieAuth)
+                    {
+                        await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                        await SendJsonAsync(stream, 401, new { error = "Authentication required." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "GET" && path == "/api/list")
+                    {
+                        queryParams.TryGetValue("path", out string? rawPath);
+                        bool includeHidden = queryParams.TryGetValue("hidden", out string? hid) && (hid == "1" || hid.Equals("true", StringComparison.OrdinalIgnoreCase));
+                        var resp = _fileServer.HandleListDir(new ListDirRequestMessage(rawPath ?? string.Empty, Recursive: false, IncludeHidden: includeHidden));
+                        await SendJsonAsync(stream, string.IsNullOrEmpty(resp.Error) ? 200 : 400, new
+                        {
+                            currentPath = resp.CurrentPath,
+                            entries = resp.Entries,
+                            error = resp.Error,
+                            freeDiskBytes = resp.FreeDiskBytes,
+                            totalDiskBytes = resp.TotalDiskBytes,
+                            readOnly = _fileServer.Options.ReadOnly
+                        }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "GET" && path == "/api/download")
+                    {
+                        queryParams.TryGetValue("path", out string? rawPath);
+                        if (!_fileServer.TryResolveSafePath(rawPath ?? string.Empty, out string fullPath, out _) || !File.Exists(fullPath))
+                        {
+                            await SendJsonAsync(stream, 404, new { error = "File not found." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        string fileName = Path.GetFileName(fullPath);
+                        await StreamFileDownloadAsync(stream, fullPath, fileName, "application/octet-stream", ct).ConfigureAwait(false);
                         Interlocked.Increment(ref _downloadedCount);
                         StatsChanged?.Invoke();
-                        Log?.Invoke($"Web/Phone downloaded folder zip: {folderName}.zip");
+                        Log?.Invoke($"Web/Phone downloaded: {fileName}");
+                        return;
                     }
-                    finally
+
+                    if (method == "GET" && path == "/api/download-zip")
                     {
-                        try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                        queryParams.TryGetValue("path", out string? rawPath);
+                        if (!_fileServer.TryResolveSafePath(rawPath ?? string.Empty, out string fullDir, out _) ||
+                            fullDir == FileShareServer.DrivesVirtualPath || !Directory.Exists(fullDir))
+                        {
+                            await SendJsonAsync(stream, 404, new { error = "Folder not found." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        string folderName = Path.GetFileName(fullDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                        if (string.IsNullOrWhiteSpace(folderName)) folderName = "SwiftBeamFolder";
+                        string tempZip = Path.Combine(Path.GetTempPath(), $"sb_zip_{Guid.NewGuid():N}.zip");
+                        try
+                        {
+                            CreateSafeZipFromDirectory(fullDir, tempZip);
+                            await StreamFileDownloadAsync(stream, tempZip, $"{folderName}.zip", "application/zip", ct).ConfigureAwait(false);
+                            Interlocked.Increment(ref _downloadedCount);
+                            StatsChanged?.Invoke();
+                            Log?.Invoke($"Web/Phone downloaded folder zip: {folderName}.zip");
+                        }
+                        finally
+                        {
+                            try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                        }
+                        return;
                     }
-                    return;
+
+                    if (method == "POST" && path == "/api/upload")
+                    {
+                        if (_fileServer.Options.ReadOnly)
+                        {
+                            await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                            await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct, keepAlive: false).ConfigureAwait(false);
+                            return;
+                        }
+
+                        queryParams.TryGetValue("dir", out string? dirRel);
+                        queryParams.TryGetValue("name", out string? rawName);
+                        if (!_fileServer.TryResolveSafePath(dirRel ?? string.Empty, out string fullDir, out _) || fullDir == FileShareServer.DrivesVirtualPath)
+                        {
+                            await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                            await SendJsonAsync(stream, 400, new { error = "Open a folder before uploading." }, ct, keepAlive: false).ConfigureAwait(false);
+                            return;
+                        }
+
+                        string safeName = Path.GetFileName((rawName ?? string.Empty).Trim());
+                        if (string.IsNullOrEmpty(safeName) || safeName is "." or "..")
+                            safeName = $"upload_{DateTime.Now:yyyyMMdd_HHmmss}.bin";
+
+                        Directory.CreateDirectory(fullDir);
+                        string desiredTarget = TransferManager.ResolveUniqueLocalPath(Path.Combine(fullDir, safeName));
+                        string partPath = desiredTarget + ".sbwebpart";
+
+                        try
+                        {
+                            long written = await StreamFixedBodyToFileAsync(stream, leftover, contentLength, partPath, ct).ConfigureAwait(false);
+                            File.Move(partPath, desiredTarget, overwrite: false);
+                            Interlocked.Increment(ref _uploadedCount);
+                            StatsChanged?.Invoke();
+                            string finalName = Path.GetFileName(desiredTarget);
+                            Log?.Invoke($"Web/Phone uploaded: {finalName} ({TransferManager.FormatBytes(written)})");
+                            await SendJsonAsync(stream, 200, new { ok = true, fileName = finalName, size = written }, ct, keepAlive: false).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            try { if (File.Exists(partPath)) File.Delete(partPath); } catch { }
+                            throw;
+                        }
+                        return;
+                    }
+
+                    if (method == "POST" && path == "/api/mkdir")
+                    {
+                        if (_fileServer.Options.ReadOnly)
+                        {
+                            await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                            await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 32 * 1024, ct).ConfigureAwait(false);
+                        string reqPath = JsonDocument.Parse(body).RootElement.GetProperty("path").GetString() ?? string.Empty;
+                        if (!_fileServer.TryResolveSafePath(reqPath, out string fullPath, out _) || fullPath == FileShareServer.DrivesVirtualPath)
+                        {
+                            await SendJsonAsync(stream, 400, new { error = "Invalid folder path." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        Directory.CreateDirectory(fullPath);
+                        await SendJsonAsync(stream, 200, new { ok = true }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "POST" && path == "/api/rename")
+                    {
+                        if (_fileServer.Options.ReadOnly)
+                        {
+                            await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                            await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 32 * 1024, ct).ConfigureAwait(false);
+                        using var doc = JsonDocument.Parse(body);
+                        string reqPath = doc.RootElement.GetProperty("path").GetString() ?? string.Empty;
+                        string newName = (doc.RootElement.GetProperty("newName").GetString() ?? string.Empty).Trim();
+
+                        if (!_fileServer.TryResolveSafePath(reqPath, out string fullPath, out _) || fullPath == FileShareServer.DrivesVirtualPath ||
+                            string.IsNullOrEmpty(newName) || newName.Contains('/') || newName.Contains('\\') || newName is "." or "..")
+                        {
+                            await SendJsonAsync(stream, 400, new { error = "Invalid path or name." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        string? parent = Path.GetDirectoryName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                        if (string.IsNullOrEmpty(parent))
+                        {
+                            await SendJsonAsync(stream, 400, new { error = "Cannot rename root drive." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        string dest = Path.Combine(parent, newName);
+                        _fileServer.EvictCachedHandles(fullPath);
+                        if (File.Exists(fullPath)) File.Move(fullPath, dest, overwrite: false);
+                        else if (Directory.Exists(fullPath)) Directory.Move(fullPath, dest);
+                        else
+                        {
+                            await SendJsonAsync(stream, 404, new { error = "Item not found." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        await SendJsonAsync(stream, 200, new { ok = true }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "POST" && path == "/api/delete")
+                    {
+                        if (_fileServer.Options.ReadOnly)
+                        {
+                            await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                            await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 32 * 1024, ct).ConfigureAwait(false);
+                        string reqPath = JsonDocument.Parse(body).RootElement.GetProperty("path").GetString() ?? string.Empty;
+                        if (!_fileServer.TryResolveSafePath(reqPath, out string fullPath, out _) || fullPath == FileShareServer.DrivesVirtualPath)
+                        {
+                            await SendJsonAsync(stream, 400, new { error = "Invalid path." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        string trimmed = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        if (string.IsNullOrEmpty(trimmed) || (trimmed.Length == 2 && trimmed[1] == ':') ||
+                            (!_fileServer.Options.AllowFullFilesystem && trimmed.Equals(Path.GetFullPath(_fileServer.Options.SharedDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)))
+                        {
+                            await SendJsonAsync(stream, 400, new { error = "Cannot delete a root or shared root folder." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                            if (!keepAlive) break;
+                            continue;
+                        }
+
+                        _fileServer.EvictCachedHandles(fullPath);
+                        FileShareServer.DeleteFileOrDirectoryRobust(fullPath);
+                        await SendJsonAsync(stream, 200, new { ok = true }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "GET" && path == "/api/text")
+                    {
+                        await SendJsonAsync(stream, 200, new { text = _latestHostText, hostName = _fileServer.Options.DeviceName }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    if (method == "POST" && path == "/api/text")
+                    {
+                        byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 256 * 1024, ct).ConfigureAwait(false);
+                        using var doc = JsonDocument.Parse(body);
+                        string text = doc.RootElement.TryGetProperty("text", out var tEl) ? (tEl.GetString() ?? string.Empty) : string.Empty;
+                        string senderName = doc.RootElement.TryGetProperty("senderName", out var sEl) ? (sEl.GetString() ?? "Phone / Web") : "Phone / Web";
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            TextReceived?.Invoke(senderName, text);
+                            Log?.Invoke($"Received text snippet via Web/Phone from {senderName} ({text.Length} chars).");
+                        }
+                        await SendJsonAsync(stream, 200, new { ok = true }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                        if (!keepAlive) break;
+                        continue;
+                    }
+
+                    await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
+                    await SendJsonAsync(stream, 404, new { error = "Not found." }, ct, keepAlive: keepAlive).ConfigureAwait(false);
+                    if (!keepAlive) break;
                 }
-
-                if (method == "POST" && path == "/api/upload")
-                {
-                    if (_fileServer.Options.ReadOnly)
-                    {
-                        await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
-                        await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    queryParams.TryGetValue("dir", out string? dirRel);
-                    queryParams.TryGetValue("name", out string? rawName);
-                    if (!_fileServer.TryResolveSafePath(dirRel ?? string.Empty, out string fullDir, out _) || fullDir == FileShareServer.DrivesVirtualPath)
-                    {
-                        await DrainFixedBodyAsync(stream, leftover, contentLength, ct).ConfigureAwait(false);
-                        await SendJsonAsync(stream, 400, new { error = "Open a folder before uploading." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    string safeName = Path.GetFileName((rawName ?? string.Empty).Trim());
-                    if (string.IsNullOrEmpty(safeName) || safeName is "." or "..")
-                        safeName = $"upload_{DateTime.Now:yyyyMMdd_HHmmss}.bin";
-
-                    Directory.CreateDirectory(fullDir);
-                    string desiredTarget = TransferManager.ResolveUniqueLocalPath(Path.Combine(fullDir, safeName));
-                    string partPath = desiredTarget + ".sbwebpart";
-
-                    try
-                    {
-                        long written = await StreamFixedBodyToFileAsync(stream, leftover, contentLength, partPath, ct).ConfigureAwait(false);
-                        File.Move(partPath, desiredTarget, overwrite: false);
-                        Interlocked.Increment(ref _uploadedCount);
-                        StatsChanged?.Invoke();
-                        string finalName = Path.GetFileName(desiredTarget);
-                        Log?.Invoke($"Web/Phone uploaded: {finalName} ({TransferManager.FormatBytes(written)})");
-                        await SendJsonAsync(stream, 200, new { ok = true, fileName = finalName, size = written }, ct).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        try { if (File.Exists(partPath)) File.Delete(partPath); } catch { }
-                        throw;
-                    }
-                    return;
-                }
-
-                if (method == "POST" && path == "/api/mkdir")
-                {
-                    if (_fileServer.Options.ReadOnly)
-                    {
-                        await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 32 * 1024, ct).ConfigureAwait(false);
-                    string reqPath = JsonDocument.Parse(body).RootElement.GetProperty("path").GetString() ?? string.Empty;
-                    if (!_fileServer.TryResolveSafePath(reqPath, out string fullPath, out _) || fullPath == FileShareServer.DrivesVirtualPath)
-                    {
-                        await SendJsonAsync(stream, 400, new { error = "Invalid folder path." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    Directory.CreateDirectory(fullPath);
-                    await SendJsonAsync(stream, 200, new { ok = true }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "POST" && path == "/api/rename")
-                {
-                    if (_fileServer.Options.ReadOnly)
-                    {
-                        await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 32 * 1024, ct).ConfigureAwait(false);
-                    using var doc = JsonDocument.Parse(body);
-                    string reqPath = doc.RootElement.GetProperty("path").GetString() ?? string.Empty;
-                    string newName = (doc.RootElement.GetProperty("newName").GetString() ?? string.Empty).Trim();
-
-                    if (!_fileServer.TryResolveSafePath(reqPath, out string fullPath, out _) || fullPath == FileShareServer.DrivesVirtualPath ||
-                        string.IsNullOrEmpty(newName) || newName.Contains('/') || newName.Contains('\\') || newName is "." or "..")
-                    {
-                        await SendJsonAsync(stream, 400, new { error = "Invalid path or name." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    string? parent = Path.GetDirectoryName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                    if (string.IsNullOrEmpty(parent))
-                    {
-                        await SendJsonAsync(stream, 400, new { error = "Cannot rename root drive." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    string dest = Path.Combine(parent, newName);
-                    _fileServer.EvictCachedHandles(fullPath);
-                    if (File.Exists(fullPath)) File.Move(fullPath, dest, overwrite: false);
-                    else if (Directory.Exists(fullPath)) Directory.Move(fullPath, dest);
-                    else { await SendJsonAsync(stream, 404, new { error = "Item not found." }, ct).ConfigureAwait(false); return; }
-
-                    await SendJsonAsync(stream, 200, new { ok = true }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "POST" && path == "/api/delete")
-                {
-                    if (_fileServer.Options.ReadOnly)
-                    {
-                        await SendJsonAsync(stream, 403, new { error = "Host is in Read-Only mode." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 32 * 1024, ct).ConfigureAwait(false);
-                    string reqPath = JsonDocument.Parse(body).RootElement.GetProperty("path").GetString() ?? string.Empty;
-                    if (!_fileServer.TryResolveSafePath(reqPath, out string fullPath, out _) || fullPath == FileShareServer.DrivesVirtualPath)
-                    {
-                        await SendJsonAsync(stream, 400, new { error = "Invalid path." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    string trimmed = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                    if (string.IsNullOrEmpty(trimmed) || (trimmed.Length == 2 && trimmed[1] == ':') ||
-                        (!_fileServer.Options.AllowFullFilesystem && trimmed.Equals(Path.GetFullPath(_fileServer.Options.SharedDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)))
-                    {
-                        await SendJsonAsync(stream, 400, new { error = "Cannot delete a root or shared root folder." }, ct).ConfigureAwait(false);
-                        return;
-                    }
-
-                    _fileServer.EvictCachedHandles(fullPath);
-                    FileShareServer.DeleteFileOrDirectoryRobust(fullPath);
-                    await SendJsonAsync(stream, 200, new { ok = true }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "GET" && path == "/api/text")
-                {
-                    await SendJsonAsync(stream, 200, new { text = _latestHostText, hostName = _fileServer.Options.DeviceName }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                if (method == "POST" && path == "/api/text")
-                {
-                    byte[] body = await ReadBoundedBodyAsync(stream, leftover, contentLength, 256 * 1024, ct).ConfigureAwait(false);
-                    using var doc = JsonDocument.Parse(body);
-                    string text = doc.RootElement.TryGetProperty("text", out var tEl) ? (tEl.GetString() ?? string.Empty) : string.Empty;
-                    string senderName = doc.RootElement.TryGetProperty("senderName", out var sEl) ? (sEl.GetString() ?? "Phone / Web") : "Phone / Web";
-                    if (!string.IsNullOrWhiteSpace(text))
-                    {
-                        TextReceived?.Invoke(senderName, text);
-                        Log?.Invoke($"Received text snippet via Web/Phone from {senderName} ({text.Length} chars).");
-                    }
-                    await SendJsonAsync(stream, 200, new { ok = true }, ct).ConfigureAwait(false);
-                    return;
-                }
-
-                await SendJsonAsync(stream, 404, new { error = "Not found." }, ct).ConfigureAwait(false);
             }
-            catch
+            catch (OperationCanceledException) { }
+            catch (IOException) { }
+            catch (SocketException) { }
+            catch (ObjectDisposedException) { }
+            catch (Exception ex)
             {
-                // Ignore disconnected browser sockets
+                Log?.Invoke($"Web/Phone request error ({remoteIp}): {ex.Message}");
+            }
+            finally
+            {
+                try { tcpClient.Client.Shutdown(SocketShutdown.Send); } catch { }
             }
         }
     }
@@ -477,19 +559,35 @@ public sealed class WebPortalServer : IAsyncDisposable
         return null;
     }
 
-    private static async Task<(string Method, string Target, Dictionary<string, string> Headers, byte[] Leftover)?> ReadHttpRequestHeadersAsync(NetworkStream stream, CancellationToken ct)
+    private static async Task<(string Method, string Target, string HttpVersion, Dictionary<string, string> Headers, byte[] Leftover)?> ReadHttpRequestHeadersAsync(
+        NetworkStream stream,
+        byte[] seedBytes,
+        int idleTimeoutMs,
+        CancellationToken ct)
     {
         byte[] buf = new byte[16 * 1024];
         int total = 0;
-        int headerEnd = -1;
-
-        while (total < buf.Length)
+        if (seedBytes.Length > 0)
         {
-            int n = await stream.ReadAsync(buf.AsMemory(total, buf.Length - total), ct).ConfigureAwait(false);
+            total = Math.Min(seedBytes.Length, buf.Length);
+            Array.Copy(seedBytes, 0, buf, 0, total);
+        }
+
+        // Fast-reject TLS ClientHello (0x16) so browsers with HTTPS-First fall back to plain HTTP immediately
+        if (total > 0 && buf[0] == 0x16)
+            return null;
+
+        int headerEnd = total > 0 ? FindHeaderEnd(buf.AsSpan(0, total)) : -1;
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(idleTimeoutMs);
+
+        while (headerEnd < 0 && total < buf.Length)
+        {
+            int n = await stream.ReadAsync(buf.AsMemory(total, buf.Length - total), timeoutCts.Token).ConfigureAwait(false);
             if (n == 0) return null;
             total += n;
+            if (buf[0] == 0x16) return null;
             headerEnd = FindHeaderEnd(buf.AsSpan(0, total));
-            if (headerEnd >= 0) break;
         }
 
         if (headerEnd < 0) return null;
@@ -500,6 +598,7 @@ public sealed class WebPortalServer : IAsyncDisposable
 
         string[] parts = lines[0].Split(' ', 3);
         if (parts.Length < 2) return null;
+        string httpVersion = parts.Length >= 3 ? parts[2].ToUpperInvariant() : "HTTP/1.1";
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 1; i < lines.Length; i++)
@@ -511,7 +610,7 @@ public sealed class WebPortalServer : IAsyncDisposable
 
         int bodyStart = headerEnd + 4;
         byte[] leftover = total > bodyStart ? buf[bodyStart..total] : [];
-        return (parts[0].ToUpperInvariant(), parts[1], headers, leftover);
+        return (parts[0].ToUpperInvariant(), parts[1], httpVersion, headers, leftover);
     }
 
     private static int FindHeaderEnd(ReadOnlySpan<byte> span)
@@ -667,7 +766,7 @@ public sealed class WebPortalServer : IAsyncDisposable
         }
     }
 
-    private static Task SendJsonAsync(NetworkStream stream, int statusCode, object payload, CancellationToken ct, string? setCookie = null)
+    private static Task SendJsonAsync(NetworkStream stream, int statusCode, object payload, CancellationToken ct, string? setCookie = null, bool keepAlive = true)
     {
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
         string statusText = statusCode switch
@@ -679,22 +778,49 @@ public sealed class WebPortalServer : IAsyncDisposable
             404 => "Not Found",
             _ => "Error"
         };
-        return SendBytesAsync(stream, statusCode, statusText, "application/json; charset=utf-8", bytes, ct, setCookie);
+        return SendBytesAsync(stream, statusCode, statusText, "application/json; charset=utf-8", bytes, ct, setCookie, keepAlive);
     }
 
-    private static async Task SendBytesAsync(NetworkStream stream, int statusCode, string statusText, string contentType, byte[] body, CancellationToken ct, string? setCookie = null)
+    private static async Task SendBytesAsync(NetworkStream stream, int statusCode, string statusText, string contentType, byte[] body, CancellationToken ct, string? setCookie = null, bool keepAlive = true)
     {
         string cookieLine = string.IsNullOrEmpty(setCookie) ? string.Empty : $"Set-Cookie: {setCookie}\r\n";
+        string connHeader = keepAlive ? "Connection: keep-alive\r\nKeep-Alive: timeout=15, max=100\r\n" : "Connection: close\r\n";
         string header =
             $"HTTP/1.1 {statusCode} {statusText}\r\n" +
             $"Content-Type: {contentType}\r\n" +
             $"Content-Length: {body.Length}\r\n" +
             cookieLine +
             "Cache-Control: no-store\r\n" +
-            "Connection: close\r\n\r\n";
+            connHeader + "\r\n";
         await stream.WriteAsync(Encoding.ASCII.GetBytes(header), ct).ConfigureAwait(false);
         if (body.Length > 0)
             await stream.WriteAsync(body, ct).ConfigureAwait(false);
+    }
+
+    private static Task SendHeadAsync(NetworkStream stream, int statusCode, string statusText, string contentType, int contentLength, CancellationToken ct, string? setCookie = null, bool keepAlive = true)
+    {
+        string cookieLine = string.IsNullOrEmpty(setCookie) ? string.Empty : $"Set-Cookie: {setCookie}\r\n";
+        string connHeader = keepAlive ? "Connection: keep-alive\r\nKeep-Alive: timeout=15, max=100\r\n" : "Connection: close\r\n";
+        string header =
+            $"HTTP/1.1 {statusCode} {statusText}\r\n" +
+            $"Content-Type: {contentType}\r\n" +
+            $"Content-Length: {contentLength}\r\n" +
+            cookieLine +
+            "Cache-Control: no-store\r\n" +
+            connHeader + "\r\n";
+        return stream.WriteAsync(Encoding.ASCII.GetBytes(header), ct).AsTask();
+    }
+
+    private static Task SendEmptyAsync(NetworkStream stream, int statusCode, string statusText, bool keepAlive, CancellationToken ct, string extraHeaders = "")
+    {
+        string connHeader = keepAlive ? "Connection: keep-alive\r\nKeep-Alive: timeout=15, max=100\r\n" : "Connection: close\r\n";
+        string header =
+            $"HTTP/1.1 {statusCode} {statusText}\r\n" +
+            extraHeaders +
+            "Content-Length: 0\r\n" +
+            "Cache-Control: no-store\r\n" +
+            connHeader + "\r\n";
+        return stream.WriteAsync(Encoding.ASCII.GetBytes(header), ct).AsTask();
     }
 
     private static Dictionary<string, string> ParseQuery(string query)
@@ -847,7 +973,18 @@ function toast(msg) {
   clearTimeout(window._tt); window._tt = setTimeout(() => t.style.display = 'none', 3200);
 }
 async function init() {
-  const r = await fetch('/api/status'); statusInfo = await r.json();
+  const qs = new URLSearchParams(location.search);
+  const qr = qs.get('qr');
+  let r = await fetch('/api/status'); statusInfo = await r.json();
+  if (!statusInfo.authenticated && qr) {
+    const ar = await fetch('/api/auth', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({qr}) });
+    if (ar.ok) {
+      r = await fetch('/api/status'); statusInfo = await r.json();
+    }
+  }
+  if (statusInfo.authenticated && qr && history && history.replaceState) {
+    history.replaceState(null, '', '/');
+  }
   document.getElementById('hostBadge').textContent = statusInfo.deviceName || 'PC';
   if (statusInfo.readOnly) {
     document.getElementById('roBadge').style.display = 'inline-block';

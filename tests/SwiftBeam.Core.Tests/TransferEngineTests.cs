@@ -1438,6 +1438,92 @@ public sealed class TransferEngineTests : IDisposable
         Assert.False(File.Exists(uploadedDest));
     }
 
+    [Fact]
+    public async Task WebPortalServer_SupportsKeepAliveHeadFaviconAndFastRejectsTlsClientHello()
+    {
+        await using var fileServer = CreateServer(pin: "135790", requirePin: false, allowUnencrypted: true);
+        fileServer.Start();
+
+        await using var webPortal = new WebPortalServer(fileServer, port: 0);
+        webPortal.Start();
+
+        var handler = new HttpClientHandler { UseCookies = true, UseProxy = false };
+        using var http = new HttpClient(handler) { BaseAddress = new Uri($"http://127.0.0.1:{webPortal.ListeningPort}") };
+
+        // HEAD / and GET /favicon.ico
+        using var headResp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/"));
+        Assert.Equal(System.Net.HttpStatusCode.OK, headResp.StatusCode);
+
+        using var favResp = await http.GetAsync("/favicon.ico");
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, favResp.StatusCode);
+
+        // Raw TLS ClientHello must be closed fast (< 2s) rather than waiting 60s
+        using (var tlsProbe = new System.Net.Sockets.TcpClient())
+        {
+            await tlsProbe.ConnectAsync("127.0.0.1", webPortal.ListeningPort);
+            var tlsStream = tlsProbe.GetStream();
+            await tlsStream.WriteAsync(new byte[] { 0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00 });
+            byte[] buf = new byte[16];
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            int read = await tlsStream.ReadAsync(buf, cts.Token);
+            Assert.Equal(0, read);
+        }
+
+        // Two sequential HTTP/1.1 requests over one kept-alive TCP connection
+        using (var tcp = new System.Net.Sockets.TcpClient())
+        {
+            await tcp.ConnectAsync("127.0.0.1", webPortal.ListeningPort);
+            var stream = tcp.GetStream();
+            byte[] req1 = System.Text.Encoding.ASCII.GetBytes($"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{webPortal.ListeningPort}\r\nConnection: keep-alive\r\n\r\n");
+            await stream.WriteAsync(req1);
+
+            string resp1 = await ReadSingleHttpResponseAsync(stream);
+            Assert.StartsWith("HTTP/1.1 200 OK", resp1);
+
+            byte[] req2 = System.Text.Encoding.ASCII.GetBytes($"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{webPortal.ListeningPort}\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(req2);
+
+            string resp2 = await ReadSingleHttpResponseAsync(stream);
+            Assert.StartsWith("HTTP/1.1 200 OK", resp2);
+        }
+    }
+
+    private static async Task<string> ReadSingleHttpResponseAsync(System.Net.Sockets.NetworkStream stream)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var ms = new MemoryStream();
+        byte[] buf = new byte[4096];
+        int headerEnd = -1;
+        int contentLen = 0;
+
+        while (true)
+        {
+            int n = await stream.ReadAsync(buf, cts.Token);
+            Assert.True(n > 0, "Unexpected EOF before HTTP response finished.");
+            ms.Write(buf, 0, n);
+            byte[] data = ms.GetBuffer();
+            int len = (int)ms.Length;
+
+            if (headerEnd < 0)
+            {
+                string s = System.Text.Encoding.ASCII.GetString(data, 0, len);
+                int idx = s.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (idx >= 0)
+                {
+                    headerEnd = idx + 4;
+                    foreach (string line in s[..idx].Split("\r\n"))
+                    {
+                        if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                            int.TryParse(line["Content-Length:".Length..].Trim(), out contentLen);
+                    }
+                }
+            }
+
+            if (headerEnd >= 0 && len >= headerEnd + contentLen)
+                return System.Text.Encoding.ASCII.GetString(data, 0, headerEnd + contentLen);
+        }
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }
