@@ -1,0 +1,2 @@
+-keep class com.cathildros.swiftbeam.protocol.** { *; }
+-dontwarn kotlin.jvm.functions.**

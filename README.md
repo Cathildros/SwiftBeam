@@ -1,10 +1,10 @@
 # SwiftBeam
 
-Lightweight, cross-platform native desktop (and CLI) file transfer app for **Windows** and **Linux**.
+Lightweight, cross-platform native desktop, CLI, and **Android** file transfer app for **Windows**, **Linux**, and **Android**.
 
 ## Key Features
 
-- **Zero-dependency standalone binaries** — single executable for Windows (`SwiftBeam.exe`) and Linux (`SwiftBeam`); no runtime install needed on target computers.
+- **Zero-dependency standalone binaries & Android APK** — single executable for Windows (`SwiftBeam-Setup.exe`), Linux (`SwiftBeam-Linux-x64`), and installable native Android app (`SwiftBeam-Android.apk`).
 - **Wi-Fi, Wired LAN, and Direct Ethernet/USB-C Cable** — automatically discovers peers across all active interfaces (IPv4 broadcast + IPv6 link-local multicast `ff02::53:4201`) and ranks direct cable links ahead of Wi-Fi.
 - **Pull as many files & folders as you want** — browse remote folders, search/filter, multi-select files and entire directory trees while preserving folder structure.
 - **Parallel transfers** — configurable 1–16 parallel streams: pulls multiple files at once AND splits large files into multi-stream chunks written concurrently.
@@ -30,6 +30,12 @@ chmod +x SwiftBeam
 ./SwiftBeam
 ```
 Or run `./install.sh` (add `--firewall` to automatically open ports `45890/tcp` and `45891/udp` in UFW/firewalld).
+
+### Manual Install — Android
+Download `SwiftBeam-Android.apk` from Releases and install it on your phone (Android 8.0+):
+- Automatically discovers nearby Windows and Linux SwiftBeam PCs over Wi-Fi (UDP `45891`).
+- Connects over TLS 1.3 + 6-digit PIN authentication directly to your PC (`45890/tcp`).
+- Browse PC drives/folders, upload photos/files, share directly from Gallery via Android's **Share** sheet, download files/folders to `Downloads/SwiftBeam`, and send Quick Text clips.
 
 ## Direct Ethernet Cable Setup (Windows ↔ Linux)
 
