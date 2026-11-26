@@ -1976,9 +1976,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         try
         {
+            int serverPort = _server.IsRunning ? _server.ListeningPort : ProtocolConstants.DefaultTransferPort;
             string targetUrl = WebPortalQrIncludePin && _settings.RequirePin
-                ? $"{WebPortalUrl}/?qr={_webPortal.QrLoginToken}"
-                : WebPortalUrl;
+                ? $"{WebPortalUrl}/?qr={_webPortal.QrLoginToken}&sbport={serverPort}&pin={Uri.EscapeDataString(_settings.Pin)}"
+                : $"{WebPortalUrl}/?sbport={serverPort}";
 
             bool[,] matrix = QrCodeEncoder.Encode(targetUrl);
             int modules = matrix.GetLength(0);

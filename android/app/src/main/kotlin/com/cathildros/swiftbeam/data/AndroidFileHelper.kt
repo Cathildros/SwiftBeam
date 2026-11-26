@@ -2,12 +2,15 @@ package com.cathildros.swiftbeam.data
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -20,6 +23,20 @@ data class LocalUploadSource(
   val displayName: String,
   val sizeBytes: Long,
   val lastModifiedUtcIso: String,
+)
+
+data class TreeFileEntry(
+  val uri: Uri,
+  val relativePath: String,
+  val displayName: String,
+  val sizeBytes: Long,
+  val lastModifiedMs: Long,
+)
+
+data class SavedDownloadResult(
+  val displayPath: String,
+  val contentUri: Uri?,
+  val mimeType: String,
 )
 
 class AndroidFileHelper(private val context: Context) {
@@ -52,6 +69,73 @@ class AndroidFileHelper(private val context: Context) {
     )
   }
 
+  fun resolveTreeLabel(treeUri: Uri): String {
+    return runCatching {
+      val docId = DocumentsContract.getTreeDocumentId(treeUri)
+      val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+      resolver.query(docUri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
+        if (c.moveToFirst()) c.getString(0)?.takeIf { it.isNotBlank() } else null
+      } ?: docId.substringAfterLast(':').ifBlank { "Selected Folder" }
+    }.getOrDefault("Selected Folder")
+  }
+
+  fun walkTree(treeUri: Uri): List<TreeFileEntry> {
+    val rootDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return emptyList()
+    val results = ArrayList<TreeFileEntry>()
+    val stack = ArrayDeque<Pair<String, String>>()
+    stack.add(rootDocId to "")
+
+    val projection = arrayOf(
+      DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+      DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+      DocumentsContract.Document.COLUMN_MIME_TYPE,
+      DocumentsContract.Document.COLUMN_SIZE,
+      DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+    )
+
+    while (stack.isNotEmpty()) {
+      val (dirDocId, prefix) = stack.removeFirst()
+      val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, dirDocId)
+      runCatching {
+        resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+          val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+          val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+          val mimeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+          val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+          val modCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+
+          while (cursor.moveToNext()) {
+            val childId = if (idCol >= 0) cursor.getString(idCol) else continue
+            val rawName = if (nameCol >= 0) cursor.getString(nameCol) else continue
+            val safeName = sanitizeFileName(rawName)
+            val mime = if (mimeCol >= 0) cursor.getString(mimeCol) else null
+            val rel = if (prefix.isEmpty()) safeName else "$prefix/$safeName"
+
+            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+              stack.add(childId to rel)
+            } else {
+              val size = if (sizeCol >= 0 && !cursor.isNull(sizeCol)) cursor.getLong(sizeCol) else -1L
+              val mod = if (modCol >= 0 && !cursor.isNull(modCol)) cursor.getLong(modCol) else System.currentTimeMillis()
+              val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+              results.add(
+                TreeFileEntry(
+                  uri = fileUri,
+                  relativePath = rel,
+                  displayName = safeName,
+                  sizeBytes = size,
+                  lastModifiedMs = mod,
+                ),
+              )
+            }
+          }
+        }
+      }
+    }
+    return results
+  }
+
+  fun openInputStream(uri: Uri): InputStream? = resolver.openInputStream(uri)
+
   suspend fun <T> withUploadStream(
     source: LocalUploadSource,
     block: suspend (stream: InputStream, exactSize: Long) -> T,
@@ -66,7 +150,6 @@ class AndroidFileHelper(private val context: Context) {
       }
     }
 
-    // Some providers omit SIZE; spool once to cache so exact length & SHA-256 work reliably.
     val tempFile = File.createTempFile("sb_up_", ".tmp", context.cacheDir)
     try {
       resolver.openInputStream(source.uri)?.use { input ->
@@ -90,13 +173,16 @@ class AndroidFileHelper(private val context: Context) {
     fileName: String,
     relativeSubfolder: String = "",
     writer: suspend (OutputStream) -> Unit,
-  ): String {
+  ): SavedDownloadResult {
     val safeName = sanitizeFileName(fileName)
     val cleanSub = relativeSubfolder
       .replace('\\', '/')
       .split('/')
       .filter { it.isNotBlank() && it != "." && it != ".." }
       .joinToString("/")
+
+    val ext = safeName.substringAfterLast('.', "").lowercase()
+    val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       val relPath = buildString {
@@ -107,8 +193,6 @@ class AndroidFileHelper(private val context: Context) {
           append(cleanSub)
         }
       }
-      val ext = safeName.substringAfterLast('.', "").lowercase()
-      val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
 
       val values = ContentValues().apply {
         put(MediaStore.Downloads.DISPLAY_NAME, safeName)
@@ -133,7 +217,11 @@ class AndroidFileHelper(private val context: Context) {
           put(MediaStore.Downloads.IS_PENDING, 0)
         }
         resolver.update(itemUri, publish, null, null)
-        return "$relPath/$safeName"
+        return SavedDownloadResult(
+          displayPath = "$relPath/$safeName",
+          contentUri = itemUri,
+          mimeType = mimeType,
+        )
       } catch (t: Throwable) {
         runCatching { resolver.delete(itemUri, null, null) }
         throw t
@@ -152,12 +240,31 @@ class AndroidFileHelper(private val context: Context) {
         } finally {
           runCatching { out.close() }
         }
-        return dest.absolutePath
+        val uri = runCatching {
+          FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dest)
+        }.getOrNull()
+        return SavedDownloadResult(
+          displayPath = dest.absolutePath,
+          contentUri = uri,
+          mimeType = mimeType,
+        )
       } catch (t: Throwable) {
         dest.delete()
         throw t
       }
     }
+  }
+
+  fun openDownloadedFile(uriString: String, mimeType: String?): Boolean {
+    return runCatching {
+      val uri = Uri.parse(uriString)
+      val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mimeType ?: "*/*")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      context.startActivity(Intent.createChooser(intent, "Open file with").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+      true
+    }.getOrDefault(false)
   }
 
   private fun uniqueFile(dir: File, name: String): File {

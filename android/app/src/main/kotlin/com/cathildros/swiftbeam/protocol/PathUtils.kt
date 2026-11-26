@@ -1,7 +1,14 @@
 package com.cathildros.swiftbeam.protocol
 
 import java.net.URI
+import java.net.URLDecoder
 import java.util.Locale
+
+data class ParsedQrTarget(
+  val host: String,
+  val port: Int,
+  val pin: String?,
+)
 
 object PathUtils {
   fun joinRemotePath(
@@ -56,11 +63,17 @@ object PathUtils {
     val trimmed = raw.trim()
     if (trimmed.isEmpty()) return "" to null
 
-    if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+    if (trimmed.startsWith("http://", ignoreCase = true) ||
+      trimmed.startsWith("https://", ignoreCase = true) ||
+      trimmed.startsWith("swiftbeam://", ignoreCase = true)
+    ) {
       return runCatching {
         val uri = URI(trimmed)
         val host = uri.host ?: trimmed
+        val params = parseQueryParams(uri.rawQuery)
+        val sbPort = params["sbport"]?.toIntOrNull()?.takeIf { it in 1..65535 }
         val port = when {
+          sbPort != null -> sbPort
           uri.port in 1..65535 && uri.port != 45893 && uri.port != 45892 -> uri.port
           uri.port == 45893 || uri.port == 45892 -> ProtocolConstants.DEFAULT_TRANSFER_PORT
           else -> null
@@ -69,7 +82,6 @@ object PathUtils {
       }.getOrElse { trimmed to null }
     }
 
-    // IPv6 bracketed [fe80::1]:45890
     if (trimmed.startsWith("[")) {
       val endBracket = trimmed.indexOf(']')
       if (endBracket > 1) {
@@ -80,7 +92,6 @@ object PathUtils {
       }
     }
 
-    // host:port (only when there's a single colon, so unbracketed IPv6 stays intact)
     val firstColon = trimmed.indexOf(':')
     val lastColon = trimmed.lastIndexOf(':')
     if (firstColon > 0 && firstColon == lastColon) {
@@ -92,6 +103,60 @@ object PathUtils {
     }
 
     return trimmed to null
+  }
+
+  fun parseQrPayload(raw: String): ParsedQrTarget? {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+
+    if (trimmed.startsWith("http://", ignoreCase = true) ||
+      trimmed.startsWith("https://", ignoreCase = true) ||
+      trimmed.startsWith("swiftbeam://", ignoreCase = true)
+    ) {
+      return runCatching {
+        val uri = URI(trimmed)
+        val host = uri.host?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val params = parseQueryParams(uri.rawQuery)
+        val sbPort = params["sbport"]?.toIntOrNull()?.takeIf { it in 1..65535 }
+        val port = sbPort ?: when {
+          uri.port in 1..65535 && uri.port != 45893 && uri.port != 45892 -> uri.port
+          else -> ProtocolConstants.DEFAULT_TRANSFER_PORT
+        }
+        val pin = params["pin"]?.let { PinAuth.normalizePin(it) }?.takeIf { it.isNotEmpty() }
+        ParsedQrTarget(host = host, port = port, pin = pin)
+      }.getOrNull()
+    }
+
+    val (host, port) = parseHostInput(trimmed)
+    if (host.isBlank()) return null
+    return ParsedQrTarget(host = host, port = port ?: ProtocolConstants.DEFAULT_TRANSFER_PORT, pin = null)
+  }
+
+  private fun parseQueryParams(rawQuery: String?): Map<String, String> {
+    if (rawQuery.isNullOrBlank()) return emptyMap()
+    val result = LinkedHashMap<String, String>()
+    for (part in rawQuery.split('&')) {
+      val eq = part.indexOf('=')
+      if (eq > 0) {
+        val key = URLDecoder.decode(part.substring(0, eq), "UTF-8").lowercase(Locale.US)
+        val valStr = URLDecoder.decode(part.substring(eq + 1), "UTF-8")
+        result[key] = valStr
+      }
+    }
+    return result
+  }
+
+  fun isPreviewableImage(name: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+    return ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+  }
+
+  fun isPreviewableText(name: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+    return ext in setOf(
+      "txt", "log", "md", "json", "xml", "yaml", "yml", "ini", "cfg", "conf",
+      "csv", "cs", "kt", "kts", "java", "py", "js", "ts", "html", "css", "sh", "ps1", "bat",
+    )
   }
 
   fun formatBytes(bytes: Long): String {
@@ -120,7 +185,6 @@ object PathUtils {
 
   fun formatRemoteDate(isoUtc: String): String {
     if (isoUtc.isBlank()) return ""
-    // Convert "2026-11-26T08:15:30.123Z" -> "2026-11-26 08:15"
     val clean = isoUtc.trim()
     val tIdx = clean.indexOf('T')
     return if (tIdx > 0 && clean.length >= tIdx + 6) {

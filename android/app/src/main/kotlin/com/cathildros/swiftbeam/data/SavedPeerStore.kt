@@ -3,6 +3,7 @@ package com.cathildros.swiftbeam.data
 import android.content.Context
 import com.cathildros.swiftbeam.protocol.ProtocolJson
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 
 @Serializable
 data class SavedPeerRecord(
@@ -25,6 +26,8 @@ data class TransferHistoryRecord(
   val status: String, // "Completed" or "Failed" or "Cancelled"
   val message: String = "",
   val completedAtMs: Long,
+  val savedUri: String? = null,
+  val mimeType: String? = null,
 )
 
 @Serializable
@@ -33,6 +36,33 @@ data class SentTextRecord(
   val text: String,
   val peerName: String,
   val sentAtMs: Long,
+)
+
+@Serializable
+data class ReceivedTextRecord(
+  val id: String,
+  val text: String,
+  val senderName: String,
+  val receivedAtMs: Long,
+)
+
+@Serializable
+data class SyncPairRecord(
+  val id: String,
+  val localTreeUri: String,
+  val localLabel: String,
+  val remotePath: String,
+  val peerHost: String,
+  val twoWay: Boolean = false,
+  val autoSyncOnConnect: Boolean = true,
+  val lastSyncedMs: Long = 0L,
+  val lastSummary: String = "Never synced",
+)
+
+data class PhoneHostPrefs(
+  val enabled: Boolean,
+  val treeUri: String?,
+  val label: String,
 )
 
 class SavedPeerStore(context: Context) {
@@ -75,15 +105,43 @@ class SavedPeerStore(context: Context) {
     encodeList(KEY_TEXTS, updated.take(30), SentTextRecord.serializer())
   }
 
+  fun loadReceivedTexts(): List<ReceivedTextRecord> = decodeList(KEY_RX_TEXTS, ReceivedTextRecord.serializer())
+
+  fun appendReceivedText(record: ReceivedTextRecord) {
+    val updated = loadReceivedTexts().toMutableList()
+    updated.add(0, record)
+    encodeList(KEY_RX_TEXTS, updated.take(30), ReceivedTextRecord.serializer())
+  }
+
+  fun loadSyncPairs(): List<SyncPairRecord> = decodeList(KEY_SYNC_PAIRS, SyncPairRecord.serializer())
+
+  fun saveSyncPairs(pairs: List<SyncPairRecord>) {
+    encodeList(KEY_SYNC_PAIRS, pairs, SyncPairRecord.serializer())
+  }
+
+  fun loadPhoneHostPrefs(): PhoneHostPrefs = PhoneHostPrefs(
+    enabled = prefs.getBoolean(KEY_PHONE_HOST_ENABLED, true),
+    treeUri = prefs.getString(KEY_PHONE_HOST_URI, null),
+    label = prefs.getString(KEY_PHONE_HOST_LABEL, "App Shared Folder") ?: "App Shared Folder",
+  )
+
+  fun savePhoneHostPrefs(enabled: Boolean, treeUri: String?, label: String) {
+    prefs.edit()
+      .putBoolean(KEY_PHONE_HOST_ENABLED, enabled)
+      .putString(KEY_PHONE_HOST_URI, treeUri)
+      .putString(KEY_PHONE_HOST_LABEL, label)
+      .apply()
+  }
+
   private fun <T> decodeList(key: String, serializer: kotlinx.serialization.KSerializer<T>): List<T> {
     val raw = prefs.getString(key, null) ?: return emptyList()
     return runCatching {
-      ProtocolJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(serializer), raw)
+      ProtocolJson.decodeFromString(ListSerializer(serializer), raw)
     }.getOrDefault(emptyList())
   }
 
   private fun <T> encodeList(key: String, list: List<T>, serializer: kotlinx.serialization.KSerializer<T>) {
-    val raw = ProtocolJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(serializer), list)
+    val raw = ProtocolJson.encodeToString(ListSerializer(serializer), list)
     prefs.edit().putString(key, raw).apply()
   }
 
@@ -91,5 +149,10 @@ class SavedPeerStore(context: Context) {
     const val KEY_PEERS = "saved_peers_json"
     const val KEY_HISTORY = "transfer_history_json"
     const val KEY_TEXTS = "sent_texts_json"
+    const val KEY_RX_TEXTS = "received_texts_json"
+    const val KEY_SYNC_PAIRS = "sync_pairs_json"
+    const val KEY_PHONE_HOST_ENABLED = "phone_host_enabled"
+    const val KEY_PHONE_HOST_URI = "phone_host_tree_uri"
+    const val KEY_PHONE_HOST_LABEL = "phone_host_tree_label"
   }
 }

@@ -1773,6 +1773,37 @@ public sealed class TransferEngineTests : IDisposable
         Assert.Equal(payload, await File.ReadAllBytesAsync(Path.Combine(_shareDir, "allowed.bin")));
     }
 
+    [Fact]
+    public async Task InstallerWebServer_ServesAndroidApk_AndLandingCard()
+    {
+        string fakeApk = Path.Combine(_rootTemp, "SwiftBeam-Android.apk");
+        byte[] apkBytes = new byte[1200];
+        apkBytes[0] = (byte)'P';
+        apkBytes[1] = (byte)'K';
+        Random.Shared.NextBytes(apkBytes.AsSpan(2));
+        await File.WriteAllBytesAsync(fakeApk, apkBytes);
+
+        var artifacts = new InstallerArtifacts(null, null, null, null, null, null, fakeApk);
+        Assert.True(artifacts.HasAndroidApk);
+        Assert.Contains("Android", artifacts.Summary);
+
+        await using var installer = new InstallerWebServer(() => "TestPC", () => 45890, port: 0, explicitArtifacts: artifacts);
+        installer.Start();
+
+        var handler = new HttpClientHandler { UseProxy = false };
+        using var http = new HttpClient(handler) { BaseAddress = new Uri($"http://127.0.0.1:{installer.ListeningPort}") };
+
+        string html = await http.GetStringAsync("/");
+        Assert.Contains("/download/android/SwiftBeam-Android.apk", html);
+        Assert.Contains("Android (APK)", html);
+
+        var resp = await http.GetAsync("/download/android/SwiftBeam-Android.apk");
+        resp.EnsureSuccessStatusCode();
+        Assert.Equal("application/vnd.android.package-archive", resp.Content.Headers.ContentType?.MediaType);
+        byte[] downloaded = await resp.Content.ReadAsByteArrayAsync();
+        Assert.Equal(apkBytes, downloaded);
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_rootTemp)) Directory.Delete(_rootTemp, recursive: true); } catch { }

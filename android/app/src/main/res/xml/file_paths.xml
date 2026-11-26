@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <external-path
+        name="swiftbeam_downloads"
+        path="Download/SwiftBeam" />
+    <cache-path
+        name="swiftbeam_cache"
+        path="." />
+    <files-path
+        name="swiftbeam_files"
+        path="." />
+</paths>

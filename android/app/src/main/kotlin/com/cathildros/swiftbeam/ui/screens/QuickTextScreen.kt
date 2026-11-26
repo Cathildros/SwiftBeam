@@ -40,7 +40,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.cathildros.swiftbeam.ui.ConnectionUiState
+import com.cathildros.swiftbeam.service.ConnectionUiState
 import com.cathildros.swiftbeam.ui.MainUiState
 import com.cathildros.swiftbeam.ui.theme.SwiftColors
 
@@ -69,8 +69,8 @@ fun QuickTextScreen(
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
           Text("Send Quick Text to PC", style = MaterialTheme.typography.titleMedium)
           Text(
-            if (connected != null) "Instantly send links, notes, or codes straight to ${connected.metadata.deviceName}."
-            else "Connect to a PC first to beam text clips.",
+            if (connected != null) "Instantly exchange links, notes, or codes with ${connected.metadata.deviceName}."
+            else "Connect to a PC first to exchange text clips.",
             style = MaterialTheme.typography.bodySmall,
           )
 
@@ -78,7 +78,7 @@ fun QuickTextScreen(
             value = state.quickTextInput,
             onValueChange = onTextChanged,
             label = { Text("Text, URL, or snippet") },
-            minLines = 4,
+            minLines = 3,
             maxLines = 8,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -89,11 +89,8 @@ fun QuickTextScreen(
             OutlinedButton(
               onClick = {
                 val clip = clipboard.getText()?.text
-                if (!clip.isNullOrEmpty()) {
-                  onTextChanged(clip)
-                } else {
-                  onShowToast("Clipboard is empty")
-                }
+                if (!clip.isNullOrEmpty()) onTextChanged(clip)
+                else onShowToast("Clipboard is empty")
               },
               shape = CircleShape,
               border = BorderStroke(1.dp, SwiftColors.Border),
@@ -117,6 +114,38 @@ fun QuickTextScreen(
                 Spacer(Modifier.width(6.dp))
                 Text("Send to PC", fontWeight = FontWeight.SemiBold)
               }
+            }
+          }
+        }
+      }
+    }
+
+    if (state.receivedTexts.isNotEmpty()) {
+      item {
+        Text("Received from PC", style = MaterialTheme.typography.titleMedium)
+      }
+      items(state.receivedTexts, key = { it.id }) { item ->
+        Surface(
+          color = SwiftColors.EmeraldBg.copy(alpha = 0.55f),
+          shape = RoundedCornerShape(14.dp),
+          border = BorderStroke(1.dp, SwiftColors.Emerald.copy(alpha = 0.5f)),
+        ) {
+          Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text("From ${item.senderName}", style = MaterialTheme.typography.bodySmall, color = SwiftColors.Emerald)
+              Spacer(Modifier.height(2.dp))
+              Text(item.text, style = MaterialTheme.typography.bodyMedium)
+            }
+            IconButton(
+              onClick = {
+                clipboard.setText(AnnotatedString(item.text))
+                onShowToast("Copied to clipboard")
+              },
+            ) {
+              Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy", tint = SwiftColors.Emerald)
             }
           }
         }

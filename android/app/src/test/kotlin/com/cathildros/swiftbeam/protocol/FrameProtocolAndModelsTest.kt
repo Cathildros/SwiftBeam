@@ -1,12 +1,15 @@
 package com.cathildros.swiftbeam.protocol
 
+import com.cathildros.swiftbeam.data.UpdateChecker
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FrameProtocolAndModelsTest {
@@ -67,5 +70,24 @@ class FrameProtocolAndModelsTest {
     assertEquals("192.168.1.44" to 50000, PathUtils.parseHostInput("192.168.1.44:50000"))
     assertEquals("fe80::1" to 45890, PathUtils.parseHostInput("[fe80::1]:45890"))
     assertEquals("fe80::1" to null, PathUtils.parseHostInput("fe80::1"))
+
+    val qrTarget = PathUtils.parseQrPayload("http://10.0.0.250:45893/?qr=token123&sbport=45890&pin=482915")
+    assertEquals(ParsedQrTarget("10.0.0.250", 45890, "482915"), qrTarget)
+
+    val customUri = PathUtils.parseQrPayload("swiftbeam://192.168.1.9:46000?pin=998877")
+    assertEquals(ParsedQrTarget("192.168.1.9", 46000, "998877"), customUri)
+
+    assertTrue(PathUtils.isPreviewableImage("photo.HEIC") == false)
+    assertTrue(PathUtils.isPreviewableImage("photo.png"))
+    assertTrue(PathUtils.isPreviewableText("notes.md"))
+    assertFalse(PathUtils.isPreviewableText("archive.zip"))
+  }
+
+  @Test
+  fun updateCheckerComparesSemverCorrectly() {
+    assertTrue(UpdateChecker.isNewerVersion("v1.6.1", "1.6.0"))
+    assertTrue(UpdateChecker.isNewerVersion("v2.0.0", "1.9.9"))
+    assertFalse(UpdateChecker.isNewerVersion("v1.6.0", "1.6.0"))
+    assertFalse(UpdateChecker.isNewerVersion("v1.5.2", "1.6.0"))
   }
 }

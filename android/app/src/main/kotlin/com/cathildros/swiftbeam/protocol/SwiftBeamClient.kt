@@ -2,6 +2,7 @@ package com.cathildros.swiftbeam.protocol
 
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
@@ -116,8 +117,8 @@ class SwiftBeamClient {
           clientName = target.clientName.ifBlank { "Android" },
           clientNonceB64 = Base64.getEncoder().encodeToString(clientNonce),
           proofB64 = Base64.getEncoder().encodeToString(proof),
-          reverseCallbackPort = 0,
-          reverseCallbackToken = null,
+          reverseCallbackPort = target.reverseCallbackPort,
+          reverseCallbackToken = target.reverseCallbackToken,
           mutualAuthToken = null,
         )
         FrameProtocol.writeJsonFrame(activeOut, FrameType.AuthResponse, AuthResponseMessage.serializer(), response)
@@ -261,10 +262,73 @@ class SwiftBeamClient {
     }
   }
 
+  suspend fun pullRangeBytes(
+    remoteRelativePath: String,
+    maxBytes: Int = 524_288,
+  ): Pair<ByteArray, Long> = ioMutex.withLock {
+    withContext(Dispatchers.IO) {
+      val (inp, out) = ensureStreams()
+      val baos = ByteArrayOutputStream()
+      var midStream = false
+      try {
+        FrameProtocol.writeJsonFrame(
+          out,
+          FrameType.PullRangeRequest,
+          PullRangeRequestMessage.serializer(),
+          PullRangeRequestMessage(remoteRelativePath, offset = 0L, length = maxBytes.toLong(), allowCompression = false),
+        )
+        val header = FrameProtocol.readJsonFrame(inp, FrameType.PullRangeHeader, PullRangeHeaderMessage.serializer())
+        if (!header.success) {
+          throw IOException(header.error ?: "Could not preview file.")
+        }
+        midStream = true
+        val buf = ByteArray(ProtocolConstants.DATA_FRAME_CHUNK_BYTES)
+        while (true) {
+          val frameHeader = FrameProtocol.readFrameHeader(inp)
+            ?: throw EOFException("Connection closed during preview.")
+          when (frameHeader.first) {
+            FrameType.DataEnd -> {
+              midStream = false
+              break
+            }
+            FrameType.Error -> {
+              val errBytes = ByteArray(frameHeader.second)
+              if (frameHeader.second > 0) FrameProtocol.readExact(inp, errBytes)
+              val err = ProtocolJson.decodeFromString(ErrorMessage.serializer(), errBytes.toString(Charsets.UTF_8))
+              midStream = false
+              throw RemoteProtocolException(err.message)
+            }
+            FrameType.DataChunk -> {
+              var rem = frameHeader.second
+              while (rem > 0) {
+                val slice = minOf(rem, buf.size)
+                FrameProtocol.readExact(inp, buf, 0, slice)
+                baos.write(buf, 0, slice)
+                rem -= slice
+              }
+            }
+            else -> throw IOException("Unexpected frame ${frameHeader.first} during preview.")
+          }
+        }
+        baos.toByteArray() to header.fileSize
+      } catch (t: Throwable) {
+        if (midStream) disconnectInternal()
+        throw t
+      }
+    }
+  }
+
   suspend fun pullFile(
     remoteRelativePath: String,
     destination: OutputStream,
     onProgress: (transferredBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+  ): PullRangeHeaderMessage = pullFileRange(remoteRelativePath, startOffset = 0L, destination = destination, onProgress = onProgress)
+
+  suspend fun pullFileRange(
+    remoteRelativePath: String,
+    startOffset: Long,
+    destination: OutputStream,
+    onProgress: (transferredInRange: Long, fileSize: Long) -> Unit = { _, _ -> },
   ): PullRangeHeaderMessage = ioMutex.withLock {
     withContext(Dispatchers.IO) {
       val (inp, out) = ensureStreams()
@@ -274,7 +338,7 @@ class SwiftBeamClient {
           out,
           FrameType.PullRangeRequest,
           PullRangeRequestMessage.serializer(),
-          PullRangeRequestMessage(remoteRelativePath, offset = 0L, length = -1L, allowCompression = false),
+          PullRangeRequestMessage(remoteRelativePath, offset = startOffset, length = -1L, allowCompression = false),
         )
 
         val header = FrameProtocol.readJsonFrame(
@@ -289,7 +353,7 @@ class SwiftBeamClient {
         midStream = true
         val chunkBuf = ByteArray(ProtocolConstants.DATA_FRAME_CHUNK_BYTES)
         var received = 0L
-        onProgress(0L, header.length)
+        onProgress(0L, header.fileSize)
 
         while (true) {
           val frameHeader = FrameProtocol.readFrameHeader(inp)
@@ -316,7 +380,7 @@ class SwiftBeamClient {
                 destination.write(chunkBuf, 0, slice)
                 received += slice
                 remaining -= slice
-                onProgress(received, header.length)
+                onProgress(received, header.fileSize)
               }
             }
             else -> throw IOException("Unexpected frame $frameType during pull stream.")
@@ -335,36 +399,18 @@ class SwiftBeamClient {
     }
   }
 
-  suspend fun pushFile(
+  suspend fun pushChunk(
     remoteRelativePath: String,
-    source: InputStream,
     totalFileSize: Long,
+    offset: Long,
+    length: Long,
+    source: InputStream,
     lastModifiedUtcIso: String,
-    onProgress: (transferredBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
-  ): PushFinalizeAckMessage = ioMutex.withLock {
+    digest: MessageDigest? = null,
+    onBytesSent: (Int) -> Unit = {},
+  ): PushChunkAckMessage = ioMutex.withLock {
     withContext(Dispatchers.IO) {
       val (inp, out) = ensureStreams()
-
-      if (totalFileSize <= 0L) {
-        onProgress(0L, 0L)
-        FrameProtocol.writeJsonFrame(
-          out,
-          FrameType.PushFinalizeRequest,
-          PushFinalizeRequestMessage.serializer(),
-          PushFinalizeRequestMessage(
-            relativePath = remoteRelativePath,
-            totalFileSize = 0L,
-            lastModifiedUtc = lastModifiedUtcIso,
-            expectedSha256Hex = null,
-          ),
-        )
-        val finAck = FrameProtocol.readJsonFrame(inp, FrameType.PushFinalizeAck, PushFinalizeAckMessage.serializer())
-        if (!finAck.success) {
-          throw IOException(finAck.error ?: "Remote host failed to finalize empty file.")
-        }
-        return@withContext finAck
-      }
-
       var headerSent = false
       var ackReceived = false
       try {
@@ -375,33 +421,30 @@ class SwiftBeamClient {
           PushChunkRequestMessage(
             relativePath = remoteRelativePath,
             totalFileSize = totalFileSize,
-            offset = 0L,
-            length = totalFileSize,
+            offset = offset,
+            length = length,
             lastModifiedUtc = lastModifiedUtcIso,
             allowCompression = false,
           ),
         )
         headerSent = true
 
-        val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(ProtocolConstants.DATA_FRAME_CHUNK_BYTES)
         var sent = 0L
-        onProgress(0L, totalFileSize)
-
-        while (sent < totalFileSize) {
-          val toRead = minOf(buffer.size.toLong(), totalFileSize - sent).toInt()
+        while (sent < length) {
+          val toRead = minOf(buffer.size.toLong(), length - sent).toInt()
           val read = source.read(buffer, 0, toRead)
           if (read < 0) break
           if (read == 0) continue
 
-          digest.update(buffer, 0, read)
+          digest?.update(buffer, 0, read)
           FrameProtocol.writeFrame(out, FrameType.DataChunk, buffer, payloadLength = read, flush = false)
           sent += read
-          onProgress(sent, totalFileSize)
+          onBytesSent(read)
         }
 
-        if (sent != totalFileSize) {
-          throw IOException("Local file size changed during upload ($sent of $totalFileSize bytes read).")
+        if (sent != length) {
+          throw IOException("Local file ended early during chunk upload ($sent of $length bytes read).")
         }
 
         FrameProtocol.writeFrame(out, FrameType.DataEnd, ByteArray(0), payloadLength = 0, flush = true)
@@ -410,24 +453,7 @@ class SwiftBeamClient {
         if (!chunkAck.success) {
           throw IOException(chunkAck.error ?: "Remote host rejected uploaded data.")
         }
-
-        val shaHex = digest.digest().joinToString("") { "%02x".format(it) }
-        FrameProtocol.writeJsonFrame(
-          out,
-          FrameType.PushFinalizeRequest,
-          PushFinalizeRequestMessage.serializer(),
-          PushFinalizeRequestMessage(
-            relativePath = remoteRelativePath,
-            totalFileSize = totalFileSize,
-            lastModifiedUtc = lastModifiedUtcIso,
-            expectedSha256Hex = shaHex,
-          ),
-        )
-        val finAck = FrameProtocol.readJsonFrame(inp, FrameType.PushFinalizeAck, PushFinalizeAckMessage.serializer())
-        if (!finAck.success) {
-          throw IOException(finAck.error ?: "Remote host failed to verify uploaded file.")
-        }
-        finAck
+        chunkAck
       } catch (t: Throwable) {
         if (headerSent && !ackReceived) {
           disconnectInternal()
@@ -435,6 +461,63 @@ class SwiftBeamClient {
         throw t
       }
     }
+  }
+
+  suspend fun finalizePush(
+    remoteRelativePath: String,
+    totalFileSize: Long,
+    lastModifiedUtcIso: String,
+    expectedSha256Hex: String?,
+  ): PushFinalizeAckMessage = ioMutex.withLock {
+    withContext(Dispatchers.IO) {
+      val (inp, out) = ensureStreams()
+      FrameProtocol.writeJsonFrame(
+        out,
+        FrameType.PushFinalizeRequest,
+        PushFinalizeRequestMessage.serializer(),
+        PushFinalizeRequestMessage(
+          relativePath = remoteRelativePath,
+          totalFileSize = totalFileSize,
+          lastModifiedUtc = lastModifiedUtcIso,
+          expectedSha256Hex = expectedSha256Hex,
+        ),
+      )
+      val finAck = FrameProtocol.readJsonFrame(inp, FrameType.PushFinalizeAck, PushFinalizeAckMessage.serializer())
+      if (!finAck.success) {
+        throw IOException(finAck.error ?: "Remote host failed to finalize uploaded file.")
+      }
+      finAck
+    }
+  }
+
+  suspend fun pushFile(
+    remoteRelativePath: String,
+    source: InputStream,
+    totalFileSize: Long,
+    lastModifiedUtcIso: String,
+    onProgress: (transferredBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+  ): PushFinalizeAckMessage {
+    if (totalFileSize <= 0L) {
+      onProgress(0L, 0L)
+      return finalizePush(remoteRelativePath, 0L, lastModifiedUtcIso, expectedSha256Hex = null)
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    var cumulative = 0L
+    onProgress(0L, totalFileSize)
+    pushChunk(
+      remoteRelativePath = remoteRelativePath,
+      totalFileSize = totalFileSize,
+      offset = 0L,
+      length = totalFileSize,
+      source = source,
+      lastModifiedUtcIso = lastModifiedUtcIso,
+      digest = digest,
+    ) { bytes ->
+      cumulative += bytes
+      onProgress(cumulative, totalFileSize)
+    }
+    val shaHex = digest.digest().joinToString("") { "%02x".format(it) }
+    return finalizePush(remoteRelativePath, totalFileSize, lastModifiedUtcIso, shaHex)
   }
 
   suspend fun disconnect() = ioMutex.withLock {

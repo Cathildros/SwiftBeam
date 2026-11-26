@@ -32,10 +32,10 @@ chmod +x SwiftBeam
 Or run `./install.sh` (add `--firewall` to automatically open ports `45890/tcp` and `45891/udp` in UFW/firewalld).
 
 ### Manual Install — Android
-Download `SwiftBeam-Android.apk` from Releases and install it on your phone (Android 8.0+):
-- Automatically discovers nearby Windows and Linux SwiftBeam PCs over Wi-Fi (UDP `45891`).
-- Connects over TLS 1.3 + 6-digit PIN authentication directly to your PC (`45890/tcp`).
-- Browse PC drives/folders, upload photos/files, share directly from Gallery via Android's **Share** sheet, download files/folders to `Downloads/SwiftBeam`, and send Quick Text clips.
+Download `SwiftBeam-Android.apk` from Releases (or directly from your PC's **Share App Link** page on port `45892`) and install it on your phone (Android 8.0+):
+- Automatically discovers nearby Windows and Linux SwiftBeam PCs over Wi-Fi (UDP `45891`) or pairs in 1 tap via the built-in **QR Code Scanner**.
+- Connects over TLS 1.3 + 6-digit PIN authentication directly to your PC (`45890/tcp`), with a background Foreground Service notification and automatic transfer resume on Wi-Fi drops.
+- Browse PC drives/folders, preview images & text files, upload photos, files, or entire folders, share directly from Gallery via Android's **Share** sheet, download files/folders to `Downloads/SwiftBeam` with 1-tap **Open**, auto-sync folders (`DCIM/Camera`), and exchange two-way Quick Text + phone folder access.
 
 ## Direct Ethernet Cable Setup (Windows ↔ Linux)
 

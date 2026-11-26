@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -29,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,14 +38,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.cathildros.swiftbeam.protocol.PathUtils
+import com.cathildros.swiftbeam.service.TransferDirection
+import com.cathildros.swiftbeam.service.TransferStatus
 import com.cathildros.swiftbeam.ui.MainUiState
-import com.cathildros.swiftbeam.ui.TransferDirection
-import com.cathildros.swiftbeam.ui.TransferStatus
 import com.cathildros.swiftbeam.ui.theme.SwiftColors
 
 @Composable
@@ -52,6 +53,7 @@ fun TransfersScreen(
   onCancelTransfer: (String) -> Unit,
   onClearFinished: () -> Unit,
   onClearHistory: () -> Unit,
+  onOpenFile: (uri: String, mimeType: String?) -> Unit,
 ) {
   LazyColumn(
     modifier = Modifier.fillMaxSize(),
@@ -81,7 +83,7 @@ fun TransfersScreen(
           border = BorderStroke(1.dp, SwiftColors.Border),
         ) {
           Text(
-            "No active transfers right now. Pick files in the Files tab or share directly from your phone Gallery!",
+            "No active transfers right now. Large transfers continue automatically in the background with a progress notification.",
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(16.dp),
           )
@@ -130,9 +132,21 @@ fun TransfersScreen(
                   overflow = TextOverflow.Ellipsis,
                 )
               }
+
               if (item.status == TransferStatus.Queued || item.status == TransferStatus.Running) {
                 IconButton(onClick = { onCancelTransfer(item.id) }) {
                   Icon(Icons.Rounded.Close, contentDescription = "Cancel transfer", tint = SwiftColors.TextSecondary)
+                }
+              } else if (item.status == TransferStatus.Completed && item.savedUri != null) {
+                OutlinedButton(
+                  onClick = { onOpenFile(item.savedUri, item.mimeType) },
+                  shape = CircleShape,
+                  border = BorderStroke(1.dp, SwiftColors.Emerald.copy(alpha = 0.6f)),
+                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                  Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(14.dp), tint = SwiftColors.Emerald)
+                  Spacer(Modifier.width(4.dp))
+                  Text("Open", style = MaterialTheme.typography.labelMedium, color = SwiftColors.Emerald)
                 }
               } else if (item.status == TransferStatus.Completed) {
                 Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = SwiftColors.Emerald)
@@ -211,15 +225,21 @@ fun TransfersScreen(
                 )
               }
             }
-            Text(
-              hist.status,
-              style = MaterialTheme.typography.labelMedium,
-              color = when (hist.status) {
-                "Completed" -> SwiftColors.Emerald
-                "Failed" -> SwiftColors.Rose
-                else -> SwiftColors.TextSecondary
-              },
-            )
+            if (hist.savedUri != null && hist.status == "Completed") {
+              IconButton(onClick = { onOpenFile(hist.savedUri, hist.mimeType) }) {
+                Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = "Open file", tint = SwiftColors.Emerald, modifier = Modifier.size(18.dp))
+              }
+            } else {
+              Text(
+                hist.status,
+                style = MaterialTheme.typography.labelMedium,
+                color = when (hist.status) {
+                  "Completed" -> SwiftColors.Emerald
+                  "Failed" -> SwiftColors.Rose
+                  else -> SwiftColors.TextSecondary
+                },
+              )
+            }
           }
         }
       }

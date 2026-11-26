@@ -131,8 +131,17 @@ jobs:
           fi
 
       - name: Run Android Unit Tests and Build Release APK
+        env:
+          SWIFTBEAM_KEYSTORE_B64: ${{ secrets.SWIFTBEAM_KEYSTORE_B64 }}
+          SWIFTBEAM_KEYSTORE_PASSWORD: ${{ secrets.SWIFTBEAM_KEYSTORE_PASSWORD }}
+          SWIFTBEAM_KEY_ALIAS: ${{ secrets.SWIFTBEAM_KEY_ALIAS }}
+          SWIFTBEAM_KEY_PASSWORD: ${{ secrets.SWIFTBEAM_KEY_PASSWORD }}
         shell: bash
         run: |
+          if [ -n "$SWIFTBEAM_KEYSTORE_B64" ]; then
+            echo "$SWIFTBEAM_KEYSTORE_B64" | base64 -d > /tmp/swiftbeam-release.jks
+            export SWIFTBEAM_KEYSTORE_PATH=/tmp/swiftbeam-release.jks
+          fi
           chmod +x android/gradlew
           cd android
           ./gradlew testDebugUnitTest assembleRelease --no-daemon

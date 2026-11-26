@@ -1,33 +1,29 @@
 package com.cathildros.swiftbeam.ui
 
 import android.app.Application
-import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
-import android.net.wifi.WifiManager
-import android.os.Build
-import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.cathildros.swiftbeam.data.AndroidFileHelper
+import com.cathildros.swiftbeam.BuildConfig
+import com.cathildros.swiftbeam.SwiftBeamApplication
+import com.cathildros.swiftbeam.data.PhoneHostPrefs
+import com.cathildros.swiftbeam.data.ReceivedTextRecord
 import com.cathildros.swiftbeam.data.SavedPeerRecord
-import com.cathildros.swiftbeam.data.SavedPeerStore
 import com.cathildros.swiftbeam.data.SentTextRecord
+import com.cathildros.swiftbeam.data.SyncPairRecord
 import com.cathildros.swiftbeam.data.TransferHistoryRecord
+import com.cathildros.swiftbeam.data.UpdateChecker
+import com.cathildros.swiftbeam.data.UpdateInfo
 import com.cathildros.swiftbeam.discovery.DiscoveredPeer
 import com.cathildros.swiftbeam.discovery.LanPeerDiscovery
-import com.cathildros.swiftbeam.protocol.ConnectedPeerMetadata
-import com.cathildros.swiftbeam.protocol.ConnectionTarget
 import com.cathildros.swiftbeam.protocol.PathUtils
 import com.cathildros.swiftbeam.protocol.ProtocolConstants
 import com.cathildros.swiftbeam.protocol.RemoteEntry
-import com.cathildros.swiftbeam.protocol.SwiftBeamClient
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CancellationException
+import com.cathildros.swiftbeam.service.ActiveTransferItem
+import com.cathildros.swiftbeam.service.ConnectionUiState
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -35,69 +31,23 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class AppTab(val label: String) {
   Connect("Connect"),
   Files("Files"),
+  Sync("Sync"),
   Transfers("Transfers"),
   QuickText("Text"),
 }
 
-sealed interface ConnectionUiState {
-  data object Disconnected : ConnectionUiState
-  data class Connecting(val host: String, val label: String) : ConnectionUiState
-  data class Connected(
-    val host: String,
-    val port: Int,
-    val metadata: ConnectedPeerMetadata,
-  ) : ConnectionUiState
-}
-
-enum class TransferDirection {
-  Upload,
-  Download,
-}
-
-enum class TransferStatus {
-  Queued,
-  Running,
-  Completed,
-  Failed,
-  Cancelled,
-}
-
-data class ActiveTransferItem(
-  val id: String,
-  val fileName: String,
-  val direction: TransferDirection,
-  val totalBytes: Long,
-  val transferredBytes: Long = 0L,
-  val bytesPerSec: Double = 0.0,
-  val status: TransferStatus = TransferStatus.Queued,
-  val message: String = "",
-)
-
-private sealed interface QueuedTransferJob {
-  val id: String
-  val fileName: String
-
-  data class UploadUri(
-    override val id: String,
-    override val fileName: String,
-    val uri: Uri,
-    val remoteDir: String,
-    val fullFilesystem: Boolean,
-  ) : QueuedTransferJob
-
-  data class DownloadFile(
-    override val id: String,
-    override val fileName: String,
-    val remoteRelativePath: String,
-    val expectedSize: Long,
-    val downloadsSubfolder: String,
-  ) : QueuedTransferJob
+sealed interface PreviewModalState {
+  data object None : PreviewModalState
+  data class Loading(val entry: RemoteEntry) : PreviewModalState
+  data class ImagePreview(val entry: RemoteEntry, val bitmap: Bitmap) : PreviewModalState
+  data class TextPreview(val entry: RemoteEntry, val text: String, val truncated: Boolean) : PreviewModalState
+  data class Error(val entry: RemoteEntry, val error: String) : PreviewModalState
 }
 
 data class MainUiState(
@@ -111,6 +61,9 @@ data class MainUiState(
   val discoveredPeers: List<DiscoveredPeer> = emptyList(),
   val isScanning: Boolean = false,
   val savedPeers: List<SavedPeerRecord> = emptyList(),
+  val phoneHostPrefs: PhoneHostPrefs = PhoneHostPrefs(true, null, "App Shared Folder"),
+  val latestUpdate: UpdateInfo? = null,
+  val isCheckingUpdate: Boolean = false,
   val currentPath: String = "",
   val entries: List<RemoteEntry> = emptyList(),
   val searchQuery: String = "",
@@ -120,60 +73,89 @@ data class MainUiState(
   val totalDiskBytes: Long? = null,
   val isLoadingDir: Boolean = false,
   val dirError: String? = null,
+  val previewState: PreviewModalState = PreviewModalState.None,
+  val syncPairs: List<SyncPairRecord> = emptyList(),
   val activeTransfers: List<ActiveTransferItem> = emptyList(),
   val transferHistory: List<TransferHistoryRecord> = emptyList(),
   val quickTextInput: String = "",
   val isSendingText: Boolean = false,
   val sentTexts: List<SentTextRecord> = emptyList(),
+  val receivedTexts: List<ReceivedTextRecord> = emptyList(),
   val pendingSharedUris: List<Uri> = emptyList(),
   val pendingSharedText: String? = null,
   val nearbyPermissionGranted: Boolean = true,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-  private val client = SwiftBeamClient()
+  private val coordinator = (application as SwiftBeamApplication).coordinator
+  private val client = coordinator.client
   private val discovery = LanPeerDiscovery(application)
-  private val store = SavedPeerStore(application)
-  private val fileHelper = AndroidFileHelper(application)
 
   private val _uiState = MutableStateFlow(
     MainUiState(
-      savedPeers = store.loadSavedPeers(),
-      transferHistory = store.loadTransferHistory(),
-      sentTexts = store.loadSentTexts(),
+      savedPeers = coordinator.savedPeers.value,
+      phoneHostPrefs = coordinator.phoneHostPrefs.value,
+      syncPairs = coordinator.syncPairs.value,
+      activeTransfers = coordinator.activeTransfers.value,
+      transferHistory = coordinator.transferHistory.value,
+      sentTexts = coordinator.sentTexts.value,
+      receivedTexts = coordinator.receivedTexts.value,
     ),
   )
   val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
-  private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
+  private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 24)
   val messages: SharedFlow<String> = _messages.asSharedFlow()
-
-  private val transferChannel = Channel<QueuedTransferJob>(Channel.UNLIMITED)
-  private val cancelledIds = ConcurrentHashMap.newKeySet<String>()
-  @Volatile
-  private var currentWorkerJob: Job? = null
-  private var keepAliveJob: Job? = null
 
   init {
     viewModelScope.launch {
-      discovery.peers.collect { peers ->
-        _uiState.update { it.copy(discoveredPeers = peers) }
-      }
+      discovery.peers.collect { peers -> _uiState.update { it.copy(discoveredPeers = peers) } }
     }
     viewModelScope.launch {
-      discovery.isScanning.collect { scanning ->
-        _uiState.update { it.copy(isScanning = scanning) }
+      discovery.isScanning.collect { scanning -> _uiState.update { it.copy(isScanning = scanning) } }
+    }
+    viewModelScope.launch {
+      coordinator.connection.collect { conn -> _uiState.update { it.copy(connection = conn) } }
+    }
+    viewModelScope.launch {
+      coordinator.activeTransfers.collect { list -> _uiState.update { it.copy(activeTransfers = list) } }
+    }
+    viewModelScope.launch {
+      coordinator.transferHistory.collect { hist -> _uiState.update { it.copy(transferHistory = hist) } }
+    }
+    viewModelScope.launch {
+      coordinator.savedPeers.collect { peers -> _uiState.update { it.copy(savedPeers = peers) } }
+    }
+    viewModelScope.launch {
+      coordinator.sentTexts.collect { texts -> _uiState.update { it.copy(sentTexts = texts) } }
+    }
+    viewModelScope.launch {
+      coordinator.receivedTexts.collect { texts -> _uiState.update { it.copy(receivedTexts = texts) } }
+    }
+    viewModelScope.launch {
+      coordinator.syncPairs.collect { pairs -> _uiState.update { it.copy(syncPairs = pairs) } }
+    }
+    viewModelScope.launch {
+      coordinator.phoneHostPrefs.collect { prefs -> _uiState.update { it.copy(phoneHostPrefs = prefs) } }
+    }
+    viewModelScope.launch {
+      coordinator.messages.collect { msg -> _messages.tryEmit(msg) }
+    }
+    viewModelScope.launch {
+      coordinator.directoryRefreshSignal.collect {
+        if (_uiState.value.connection is ConnectionUiState.Connected) {
+          loadDirectory()
+        }
       }
     }
+
     discovery.start(viewModelScope)
-    startTransferWorker()
+    checkForUpdates(silent = true)
   }
 
   fun setNearbyPermissionGranted(granted: Boolean) {
     _uiState.update { it.copy(nearbyPermissionGranted = granted) }
-    if (granted) {
-      refreshDiscovery()
-    }
+    if (granted) refreshDiscovery()
   }
 
   fun selectTab(tab: AppTab) {
@@ -181,11 +163,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun updateHostInput(value: String) {
+    val parsedQr = PathUtils.parseQrPayload(value)
+    if (parsedQr != null && (value.contains("://") || value.contains("sbport=") || value.contains("pin="))) {
+      _uiState.update { state ->
+        state.copy(
+          hostInput = parsedQr.host,
+          portInput = parsedQr.port.toString(),
+          pinInput = parsedQr.pin ?: state.pinInput,
+          connectionError = null,
+        )
+      }
+      return
+    }
     val (parsedHost, parsedPort) = PathUtils.parseHostInput(value)
     _uiState.update { state ->
-      val looksLikeUrlOrPort = value.contains("://") || parsedPort != null
+      val looksLikePort = parsedPort != null
       state.copy(
-        hostInput = if (looksLikeUrlOrPort) parsedHost else value,
+        hostInput = if (looksLikePort) parsedHost else value,
         portInput = parsedPort?.toString() ?: state.portInput,
         connectionError = null,
       )
@@ -193,13 +187,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun updatePortInput(value: String) {
-    val digits = value.filter { it.isDigit() }.take(5)
-    _uiState.update { it.copy(portInput = digits, connectionError = null) }
+    _uiState.update { it.copy(portInput = value.filter { c -> c.isDigit() }.take(5), connectionError = null) }
   }
 
   fun updatePinInput(value: String) {
-    val cleaned = value.filter { it.isLetterOrDigit() }.take(12)
-    _uiState.update { it.copy(pinInput = cleaned, connectionError = null) }
+    _uiState.update { it.copy(pinInput = value.filter { c -> c.isLetterOrDigit() }.take(12), connectionError = null) }
   }
 
   fun updateUseTls(enabled: Boolean) {
@@ -208,8 +200,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun refreshDiscovery() {
     discovery.start(viewModelScope)
+    viewModelScope.launch { discovery.probeNow() }
+  }
+
+  fun checkForUpdates(silent: Boolean = false) {
     viewModelScope.launch {
-      discovery.probeNow()
+      _uiState.update { it.copy(isCheckingUpdate = true) }
+      val info = UpdateChecker.checkLatestRelease(BuildConfig.VERSION_NAME)
+      _uiState.update { it.copy(isCheckingUpdate = false, latestUpdate = info) }
+      if (!silent) {
+        if (info != null) _messages.tryEmit("SwiftBeam v${info.version} is available!")
+        else _messages.tryEmit("You're on the latest version (${BuildConfig.VERSION_NAME})")
+      }
+    }
+  }
+
+  fun togglePhoneHostEnabled(enabled: Boolean) {
+    coordinator.updatePhoneHostSettings(enabled = enabled)
+  }
+
+  fun setPhoneHostFolder(treeUri: Uri) {
+    val label = coordinator.fileHelper.resolveTreeLabel(treeUri)
+    coordinator.updatePhoneHostSettings(enabled = true, treeUri = treeUri.toString(), label = label)
+    _messages.tryEmit("Phone shared folder set to: $label")
+  }
+
+  fun handleScannedQr(rawPayload: String) {
+    val parsed = PathUtils.parseQrPayload(rawPayload)
+    if (parsed == null) {
+      _messages.tryEmit("QR code doesn't look like a SwiftBeam host URL.")
+      return
+    }
+    val pinToUse = parsed.pin ?: _uiState.value.pinInput
+    _uiState.update {
+      it.copy(
+        hostInput = parsed.host,
+        portInput = parsed.port.toString(),
+        pinInput = pinToUse,
+        connectionError = null,
+      )
+    }
+    if (!parsed.pin.isNullOrBlank()) {
+      connectTo(parsed.host, parsed.port, parsed.pin, true, parsed.host)
+    } else {
+      _messages.tryEmit("QR scanned (${parsed.host}:${parsed.port}). Enter PIN to connect.")
     }
   }
 
@@ -226,8 +260,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun removeSavedPeer(peer: SavedPeerRecord) {
-    store.removeSavedPeer(peer.host, peer.port)
-    _uiState.update { it.copy(savedPeers = store.loadSavedPeers()) }
+    coordinator.removeSavedPeer(peer.host, peer.port)
   }
 
   fun connectManual() {
@@ -252,7 +285,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     viewModelScope.launch {
       _uiState.update {
         it.copy(
-          connection = ConnectionUiState.Connecting(host, displayLabel),
           hostInput = host,
           portInput = port.toString(),
           pinInput = pin,
@@ -260,18 +292,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           connectionError = null,
         )
       }
-
-      val phoneName = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android Phone"
-      val target = ConnectionTarget(
-        host = host.trim(),
-        port = port,
-        pin = pin,
-        useTls = useTls,
-        clientName = phoneName,
-      )
-
       try {
-        val metadata = client.connect(target)
+        val metadata = coordinator.connect(host, port, pin, useTls, displayLabel)
         val initialPath = when {
           metadata.fullFilesystemAccess && !metadata.desktopPath.isNullOrBlank() -> metadata.desktopPath
           metadata.fullFilesystemAccess && !metadata.homePath.isNullOrBlank() -> metadata.homePath
@@ -279,24 +301,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           else -> ""
         }
 
-        store.upsertSavedPeer(
-          SavedPeerRecord(
-            deviceName = metadata.deviceName,
-            host = target.host,
-            port = target.port,
-            pin = target.pin,
-            useTls = target.useTls,
-            lastConnectedMs = System.currentTimeMillis(),
-          ),
-        )
-
         val pendingUris = _uiState.value.pendingSharedUris
         val pendingText = _uiState.value.pendingSharedText
 
         _uiState.update { state ->
           state.copy(
-            connection = ConnectionUiState.Connected(target.host, target.port, metadata),
-            savedPeers = store.loadSavedPeers(),
             currentPath = initialPath,
             selectedPaths = emptySet(),
             searchQuery = "",
@@ -307,36 +316,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             pendingSharedText = null,
           )
         }
-
-        startKeepAliveLoop()
         loadDirectory(initialPath)
         _messages.tryEmit("Connected to ${metadata.deviceName}")
-
-        if (pendingUris.isNotEmpty()) {
-          uploadUris(pendingUris)
-        }
+        if (pendingUris.isNotEmpty()) uploadUris(pendingUris)
       } catch (t: Throwable) {
-        _uiState.update {
-          it.copy(
-            connection = ConnectionUiState.Disconnected,
-            connectionError = t.message ?: "Could not connect to $host:$port",
-          )
-        }
+        _uiState.update { it.copy(connectionError = t.message ?: "Could not connect to $host:$port") }
       }
     }
   }
 
   fun disconnect() {
-    keepAliveJob?.cancel()
-    keepAliveJob = null
     viewModelScope.launch {
-      client.disconnect()
+      coordinator.disconnect()
       _uiState.update {
         it.copy(
-          connection = ConnectionUiState.Disconnected,
           entries = emptyList(),
           selectedPaths = emptySet(),
           dirError = null,
+          previewState = PreviewModalState.None,
           activeTab = AppTab.Connect,
         )
       }
@@ -345,50 +342,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  private fun startKeepAliveLoop() {
-    keepAliveJob?.cancel()
-    keepAliveJob = viewModelScope.launch {
-      while (isActive) {
-        delay(20_000L)
-        if (_uiState.value.connection !is ConnectionUiState.Connected) break
-        if (_uiState.value.activeTransfers.any { it.status == TransferStatus.Running }) continue
-        val ok = client.ping()
-        if (!ok) {
-          handleUnexpectedDisconnect("Connection to PC was lost.")
-          break
-        }
-      }
-    }
-  }
-
-  private fun handleUnexpectedDisconnect(reason: String) {
-    keepAliveJob?.cancel()
-    keepAliveJob = null
-    viewModelScope.launch {
-      client.disconnect()
-      _uiState.update {
-        it.copy(
-          connection = ConnectionUiState.Disconnected,
-          entries = emptyList(),
-          selectedPaths = emptySet(),
-          connectionError = reason,
-          activeTab = AppTab.Connect,
-        )
-      }
-      _messages.tryEmit(reason)
-    }
-  }
-
   fun loadDirectory(path: String = _uiState.value.currentPath) {
     val conn = _uiState.value.connection as? ConnectionUiState.Connected ?: return
     viewModelScope.launch {
       _uiState.update { it.copy(isLoadingDir = true, dirError = null) }
       try {
-        val resp = client.listDirectory(
-          relativePath = path,
-          recursive = false,
-          includeHidden = _uiState.value.showHidden,
-        )
+        val resp = client.listDirectory(path, recursive = false, includeHidden = _uiState.value.showHidden)
         _uiState.update {
           it.copy(
             currentPath = resp.currentPath.ifEmpty { if (conn.metadata.fullFilesystemAccess) ProtocolConstants.DRIVES_VIRTUAL_PATH else "" },
@@ -402,9 +361,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
       } catch (t: Throwable) {
         _uiState.update { it.copy(isLoadingDir = false, dirError = t.message ?: "Failed to load directory.") }
-        if (!client.isConnected) {
-          handleUnexpectedDisconnect(t.message ?: "Connection lost.")
-        }
       }
     }
   }
@@ -412,9 +368,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun openEntry(entry: RemoteEntry) {
     if (entry.isDirectory) {
       loadDirectory(entry.relativePath)
+    } else if (PathUtils.isPreviewableImage(entry.name) || PathUtils.isPreviewableText(entry.name)) {
+      previewEntry(entry)
     } else {
       downloadEntries(listOf(entry))
     }
+  }
+
+  fun previewEntry(entry: RemoteEntry) {
+    if (entry.isDirectory) return
+    val isImg = PathUtils.isPreviewableImage(entry.name)
+    val isTxt = PathUtils.isPreviewableText(entry.name)
+    if (!isImg && !isTxt) {
+      _messages.tryEmit("Preview not supported for this file type — downloading instead.")
+      downloadEntries(listOf(entry))
+      return
+    }
+    viewModelScope.launch {
+      _uiState.update { it.copy(previewState = PreviewModalState.Loading(entry)) }
+      try {
+        val maxBytes = if (isImg) 6 * 1024 * 1024 else 256 * 1024
+        val (bytes, totalSize) = client.pullRangeBytes(entry.relativePath, maxBytes)
+        if (isImg) {
+          val bmp = withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+          if (bmp != null) {
+            _uiState.update { it.copy(previewState = PreviewModalState.ImagePreview(entry, bmp)) }
+          } else {
+            _uiState.update { it.copy(previewState = PreviewModalState.Error(entry, "Could not decode image preview.")) }
+          }
+        } else {
+          val text = bytes.toString(Charsets.UTF_8)
+          _uiState.update { it.copy(previewState = PreviewModalState.TextPreview(entry, text, truncated = totalSize > bytes.size)) }
+        }
+      } catch (t: Throwable) {
+        _uiState.update { it.copy(previewState = PreviewModalState.Error(entry, t.message ?: "Preview failed.")) }
+      }
+    }
+  }
+
+  fun dismissPreview() {
+    _uiState.update { it.copy(previewState = PreviewModalState.None) }
   }
 
   fun navigateUp() {
@@ -449,7 +442,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val trimmed = name.trim()
     if (trimmed.isEmpty()) return
     viewModelScope.launch {
-      try {
+      runCatching {
         val target = PathUtils.joinRemotePath(_uiState.value.currentPath, trimmed, conn.metadata.fullFilesystemAccess)
         val resp = client.createDirectory(target)
         if (resp.success) {
@@ -458,9 +451,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
           _messages.tryEmit(resp.error ?: "Could not create folder.")
         }
-      } catch (t: Throwable) {
-        _messages.tryEmit(t.message ?: "Create folder failed.")
-      }
+      }.onFailure { _messages.tryEmit(it.message ?: "Create folder failed.") }
     }
   }
 
@@ -468,7 +459,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val trimmed = newName.trim()
     if (trimmed.isEmpty() || trimmed == entry.name) return
     viewModelScope.launch {
-      try {
+      runCatching {
         val resp = client.renamePath(entry.relativePath, trimmed)
         if (resp.success) {
           _messages.tryEmit("Renamed to '$trimmed'")
@@ -476,9 +467,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
           _messages.tryEmit(resp.error ?: "Rename failed.")
         }
-      } catch (t: Throwable) {
-        _messages.tryEmit(t.message ?: "Rename failed.")
-      }
+      }.onFailure { _messages.tryEmit(it.message ?: "Rename failed.") }
     }
   }
 
@@ -490,11 +479,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       for (entry in entries) {
         try {
           val resp = client.deletePath(entry.relativePath)
-          if (resp.success) {
-            deleted++
-          } else if (firstErr == null) {
-            firstErr = resp.error
-          }
+          if (resp.success) deleted++ else if (firstErr == null) firstErr = resp.error
         } catch (t: Throwable) {
           if (firstErr == null) firstErr = t.message
         }
@@ -512,9 +497,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun handleIncomingShare(uris: List<Uri>, sharedText: String?) {
     val conn = _uiState.value.connection as? ConnectionUiState.Connected
     if (conn != null) {
-      if (uris.isNotEmpty()) {
-        uploadUris(uris)
-      }
+      if (uris.isNotEmpty()) uploadUris(uris)
       if (!sharedText.isNullOrBlank()) {
         _uiState.update {
           it.copy(
@@ -525,17 +508,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       }
     } else {
       _uiState.update {
-        it.copy(
-          pendingSharedUris = uris,
-          pendingSharedText = sharedText,
-          activeTab = AppTab.Connect,
-        )
+        it.copy(pendingSharedUris = uris, pendingSharedText = sharedText, activeTab = AppTab.Connect)
       }
-      if (uris.isNotEmpty()) {
-        _messages.tryEmit("Connect to your PC to send ${uris.size} shared item(s)")
-      } else if (!sharedText.isNullOrBlank()) {
-        _messages.tryEmit("Connect to your PC to send shared text")
-      }
+      if (uris.isNotEmpty()) _messages.tryEmit("Connect to your PC to send ${uris.size} shared item(s)")
+      else if (!sharedText.isNullOrBlank()) _messages.tryEmit("Connect to your PC to send shared text")
     }
   }
 
@@ -544,162 +520,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun uploadUris(uris: List<Uri>) {
-    if (uris.isEmpty()) return
     val conn = _uiState.value.connection as? ConnectionUiState.Connected ?: run {
-      _messages.tryEmit("Connect to a PC first before sending files.")
+      _messages.tryEmit("Connect to a PC first.")
       return
     }
     if (conn.metadata.readOnly) {
       _messages.tryEmit("Connected PC is in Read-Only mode.")
       return
     }
-
-    val targetDir = _uiState.value.currentPath.let { cur ->
-      if (conn.metadata.fullFilesystemAccess && cur == ProtocolConstants.DRIVES_VIRTUAL_PATH) {
-        conn.metadata.downloadsPath ?: conn.metadata.desktopPath ?: conn.metadata.homePath ?: ""
-      } else {
-        cur
-      }
-    }
-    if (conn.metadata.fullFilesystemAccess && targetDir.isBlank()) {
+    val targetDir = resolveWritableDir(conn) ?: run {
       _messages.tryEmit("Open a folder or drive on your PC before uploading.")
       return
     }
+    coordinator.enqueueUploads(uris, targetDir, conn.metadata.fullFilesystemAccess)
+  }
 
-    viewModelScope.launch {
-      val addedItems = mutableListOf<ActiveTransferItem>()
-      for (uri in uris) {
-        val meta = fileHelper.inspectUri(uri)
-        val id = UUID.randomUUID().toString()
-        addedItems.add(
-          ActiveTransferItem(
-            id = id,
-            fileName = meta.displayName,
-            direction = TransferDirection.Upload,
-            totalBytes = maxOf(0L, meta.sizeBytes),
-            status = TransferStatus.Queued,
-          ),
-        )
-        transferChannel.send(
-          QueuedTransferJob.UploadUri(
-            id = id,
-            fileName = meta.displayName,
-            uri = uri,
-            remoteDir = targetDir,
-            fullFilesystem = conn.metadata.fullFilesystemAccess,
-          ),
-        )
-      }
-      _uiState.update { it.copy(activeTransfers = it.activeTransfers + addedItems) }
-      _messages.tryEmit("Queued ${addedItems.size} file(s) for upload")
+  fun uploadFolderTree(treeUri: Uri) {
+    val conn = _uiState.value.connection as? ConnectionUiState.Connected ?: run {
+      _messages.tryEmit("Connect to a PC first.")
+      return
     }
+    if (conn.metadata.readOnly) {
+      _messages.tryEmit("Connected PC is in Read-Only mode.")
+      return
+    }
+    val targetDir = resolveWritableDir(conn) ?: run {
+      _messages.tryEmit("Open a folder or drive on your PC before uploading.")
+      return
+    }
+    coordinator.enqueueFolderTreeUpload(treeUri, targetDir, conn.metadata.fullFilesystemAccess)
+  }
+
+  private fun resolveWritableDir(conn: ConnectionUiState.Connected): String? {
+    val cur = _uiState.value.currentPath
+    val dir = if (conn.metadata.fullFilesystemAccess && cur == ProtocolConstants.DRIVES_VIRTUAL_PATH) {
+      conn.metadata.downloadsPath ?: conn.metadata.desktopPath ?: conn.metadata.homePath ?: ""
+    } else {
+      cur
+    }
+    return if (conn.metadata.fullFilesystemAccess && dir.isBlank()) null else dir
   }
 
   fun downloadEntries(entries: List<RemoteEntry>) {
-    if (entries.isEmpty()) return
     if (_uiState.value.connection !is ConnectionUiState.Connected) {
       _messages.tryEmit("Connect to a PC first.")
       return
     }
+    clearSelection()
+    coordinator.enqueueDownloads(entries, _uiState.value.showHidden)
+  }
 
-    viewModelScope.launch {
-      val jobs = mutableListOf<Pair<ActiveTransferItem, QueuedTransferJob>>()
-      for (entry in entries) {
-        if (!entry.isDirectory) {
-          val id = UUID.randomUUID().toString()
-          jobs.add(
-            ActiveTransferItem(
-              id = id,
-              fileName = entry.name,
-              direction = TransferDirection.Download,
-              totalBytes = entry.size,
-              status = TransferStatus.Queued,
-            ) to QueuedTransferJob.DownloadFile(
-              id = id,
-              fileName = entry.name,
-              remoteRelativePath = entry.relativePath,
-              expectedSize = entry.size,
-              downloadsSubfolder = "",
-            ),
-          )
-        } else {
-          try {
-            val listing = client.listDirectory(
-              relativePath = entry.relativePath,
-              recursive = true,
-              includeHidden = _uiState.value.showHidden,
-            )
-            val baseNorm = entry.relativePath.replace('\\', '/').trimEnd('/')
-            val files = listing.entries.filter { !it.isDirectory }
-            for (child in files) {
-              val childNorm = child.relativePath.replace('\\', '/')
-              val relFromRoot = childNorm.removePrefix(baseNorm).trimStart('/')
-              val subParent = relFromRoot.substringBeforeLast('/', "")
-              val subfolder = if (subParent.isEmpty()) entry.name else "${entry.name}/$subParent"
-              val id = UUID.randomUUID().toString()
-              jobs.add(
-                ActiveTransferItem(
-                  id = id,
-                  fileName = child.name,
-                  direction = TransferDirection.Download,
-                  totalBytes = child.size,
-                  status = TransferStatus.Queued,
-                ) to QueuedTransferJob.DownloadFile(
-                  id = id,
-                  fileName = child.name,
-                  remoteRelativePath = child.relativePath,
-                  expectedSize = child.size,
-                  downloadsSubfolder = subfolder,
-                ),
-              )
-            }
-          } catch (t: Throwable) {
-            _messages.tryEmit("Could not list '${entry.name}': ${t.message}")
-          }
-        }
-      }
-
-      if (jobs.isEmpty()) {
-        _messages.tryEmit("Selected folder has no files to download.")
-        return@launch
-      }
-
-      for ((_, job) in jobs) {
-        transferChannel.send(job)
-      }
-      _uiState.update { it.copy(activeTransfers = it.activeTransfers + jobs.map { pair -> pair.first }) }
-      clearSelection()
-      _messages.tryEmit("Queued ${jobs.size} download(s) -> Downloads/SwiftBeam")
+  fun openDownloadedUri(uriString: String, mimeType: String?) {
+    if (!coordinator.fileHelper.openDownloadedFile(uriString, mimeType)) {
+      _messages.tryEmit("No installed app could open that file type.")
     }
   }
 
-  fun cancelTransfer(id: String) {
-    cancelledIds.add(id)
-    val running = currentWorkerJob
-    val currentRunningId = _uiState.value.activeTransfers.firstOrNull { it.status == TransferStatus.Running }?.id
-    if (id == currentRunningId) {
-      running?.cancel()
-    } else {
-      _uiState.update { state ->
-        state.copy(activeTransfers = state.activeTransfers.filterNot { it.id == id })
-      }
-    }
+  fun resolveSyncFolderLabel(treeUri: Uri): String = coordinator.fileHelper.resolveTreeLabel(treeUri)
+
+  fun addSyncPair(treeUri: Uri, remotePath: String, twoWay: Boolean, autoOnConnect: Boolean) {
+    coordinator.addSyncPair(treeUri, remotePath, twoWay, autoOnConnect)
+    _messages.tryEmit("Added Auto-Sync folder")
   }
 
-  fun clearFinishedTransfers() {
-    _uiState.update { state ->
-      state.copy(
-        activeTransfers = state.activeTransfers.filter {
-          it.status == TransferStatus.Queued || it.status == TransferStatus.Running
-        },
-      )
-    }
-  }
+  fun syncPairNow(id: String) = coordinator.syncPairNow(id)
+  fun toggleSyncPairAuto(id: String, enabled: Boolean) = coordinator.toggleSyncPairAuto(id, enabled)
+  fun removeSyncPair(id: String) = coordinator.removeSyncPair(id)
 
-  fun clearHistory() {
-    store.clearTransferHistory()
-    _uiState.update { it.copy(transferHistory = emptyList()) }
-  }
+  fun cancelTransfer(id: String) = coordinator.cancelTransfer(id)
+  fun clearFinishedTransfers() = coordinator.clearFinishedTransfers()
+  fun clearHistory() = coordinator.clearHistory()
 
   fun updateQuickTextInput(text: String) {
     _uiState.update { it.copy(quickTextInput = text) }
@@ -707,274 +597,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun sendQuickText() {
     val text = _uiState.value.quickTextInput.trim()
-    val conn = _uiState.value.connection as? ConnectionUiState.Connected
-    if (conn == null) {
+    val conn = _uiState.value.connection as? ConnectionUiState.Connected ?: run {
       _messages.tryEmit("Connect to a PC first.")
       return
     }
     if (text.isEmpty()) return
-
     viewModelScope.launch {
       _uiState.update { it.copy(isSendingText = true) }
       try {
-        val sender = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android Phone"
-        val ack = client.sendText(text, sender)
-        if (ack.success) {
-          store.appendSentText(
-            SentTextRecord(
-              id = UUID.randomUUID().toString(),
-              text = text,
-              peerName = conn.metadata.deviceName,
-              sentAtMs = System.currentTimeMillis(),
-            ),
-          )
-          _uiState.update {
-            it.copy(
-              isSendingText = false,
-              quickTextInput = "",
-              sentTexts = store.loadSentTexts(),
-            )
-          }
-          _messages.tryEmit("Sent text to ${conn.metadata.deviceName}")
-        } else {
-          _uiState.update { it.copy(isSendingText = false) }
-          _messages.tryEmit(ack.error ?: "Failed to send text.")
+        val ok = coordinator.sendText(text)
+        _uiState.update {
+          it.copy(isSendingText = false, quickTextInput = if (ok) "" else it.quickTextInput)
         }
+        if (ok) _messages.tryEmit("Sent text to ${conn.metadata.deviceName}")
       } catch (t: Throwable) {
         _uiState.update { it.copy(isSendingText = false) }
         _messages.tryEmit(t.message ?: "Failed to send text.")
       }
     }
-  }
-
-  private fun startTransferWorker() {
-    viewModelScope.launch(Dispatchers.IO) {
-      for (job in transferChannel) {
-        if (cancelledIds.remove(job.id)) continue
-
-        val conn = _uiState.value.connection as? ConnectionUiState.Connected
-        if (conn == null || !client.isConnected) {
-          markTransferFinished(job.id, job.fileName, jobDirection(job), 0L, 0.0, TransferStatus.Failed, "Not connected to PC", "Disconnected")
-          continue
-        }
-
-        val worker = launch(Dispatchers.IO) {
-          executeTransferWithLocks(job, conn)
-        }
-        currentWorkerJob = worker
-        worker.join()
-        currentWorkerJob = null
-      }
-    }
-  }
-
-  private suspend fun executeTransferWithLocks(
-    job: QueuedTransferJob,
-    conn: ConnectionUiState.Connected,
-  ) {
-    val ctx = getApplication<Application>()
-    val powerMgr = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
-    val wakeLock = runCatching {
-      powerMgr?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SwiftBeam::TransferWakeLock")?.apply {
-        acquire(10 * 60 * 1000L)
-      }
-    }.getOrNull()
-
-    val wifiMgr = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-    @Suppress("DEPRECATION")
-    val wifiLock = runCatching {
-      val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-      } else {
-        WifiManager.WIFI_MODE_FULL_HIGH_PERF
-      }
-      wifiMgr?.createWifiLock(mode, "SwiftBeam::TransferWifiLock")?.apply { acquire() }
-    }.getOrNull()
-
-    val startNs = System.nanoTime()
-    var lastUiUpdateNs = startNs
-    var totalTransferred = 0L
-
-    updateTransferProgress(job.id, TransferStatus.Running, 0L, null, 0.0, "")
-
-    try {
-      when (job) {
-        is QueuedTransferJob.UploadUri -> {
-          val meta = fileHelper.inspectUri(job.uri)
-          val remoteTarget = PathUtils.joinRemotePath(job.remoteDir, meta.displayName, job.fullFilesystem)
-          fileHelper.withUploadStream(meta) { stream, exactSize ->
-            updateTransferProgress(job.id, TransferStatus.Running, 0L, exactSize, 0.0, "")
-            client.pushFile(
-              remoteRelativePath = remoteTarget,
-              source = stream,
-              totalFileSize = exactSize,
-              lastModifiedUtcIso = meta.lastModifiedUtcIso,
-            ) { sent, total ->
-              totalTransferred = sent
-              val nowNs = System.nanoTime()
-              if (nowNs - lastUiUpdateNs >= 120_000_000L || sent >= total) {
-                lastUiUpdateNs = nowNs
-                val secs = maxOf(0.05, (nowNs - startNs) / 1_000_000_000.0)
-                updateTransferProgress(job.id, TransferStatus.Running, sent, total, sent / secs, "")
-              }
-            }
-            totalTransferred = exactSize
-          }
-          val secs = maxOf(0.05, (System.nanoTime() - startNs) / 1_000_000_000.0)
-          markTransferFinished(
-            id = job.id,
-            fileName = job.fileName,
-            direction = TransferDirection.Upload,
-            totalBytes = totalTransferred,
-            avgBps = totalTransferred / secs,
-            status = TransferStatus.Completed,
-            message = "Uploaded to PC",
-            peerName = conn.metadata.deviceName,
-          )
-          loadDirectory()
-        }
-
-        is QueuedTransferJob.DownloadFile -> {
-          var finalSize = job.expectedSize
-          val savedPath = fileHelper.saveToDownloads(job.fileName, job.downloadsSubfolder) { outStream ->
-            val header = client.pullFile(job.remoteRelativePath, outStream) { received, total ->
-              totalTransferred = received
-              finalSize = total
-              val nowNs = System.nanoTime()
-              if (nowNs - lastUiUpdateNs >= 120_000_000L || received >= total) {
-                lastUiUpdateNs = nowNs
-                val secs = maxOf(0.05, (nowNs - startNs) / 1_000_000_000.0)
-                updateTransferProgress(job.id, TransferStatus.Running, received, total, received / secs, "")
-              }
-            }
-            if (!header.success) {
-              throw IllegalStateException(header.error ?: "Download failed.")
-            }
-            totalTransferred = header.length
-            finalSize = header.length
-          }
-          val secs = maxOf(0.05, (System.nanoTime() - startNs) / 1_000_000_000.0)
-          markTransferFinished(
-            id = job.id,
-            fileName = job.fileName,
-            direction = TransferDirection.Download,
-            totalBytes = finalSize,
-            avgBps = finalSize / secs,
-            status = TransferStatus.Completed,
-            message = savedPath,
-            peerName = conn.metadata.deviceName,
-          )
-        }
-      }
-    } catch (ce: CancellationException) {
-      markTransferFinished(
-        id = job.id,
-        fileName = job.fileName,
-        direction = jobDirection(job),
-        totalBytes = totalTransferred,
-        avgBps = 0.0,
-        status = TransferStatus.Cancelled,
-        message = "Cancelled",
-        peerName = conn.metadata.deviceName,
-      )
-      throw ce
-    } catch (t: Throwable) {
-      markTransferFinished(
-        id = job.id,
-        fileName = job.fileName,
-        direction = jobDirection(job),
-        totalBytes = totalTransferred,
-        avgBps = 0.0,
-        status = TransferStatus.Failed,
-        message = t.message ?: "Transfer failed.",
-        peerName = conn.metadata.deviceName,
-      )
-    } finally {
-      runCatching { if (wifiLock?.isHeld == true) wifiLock.release() }
-      runCatching { if (wakeLock?.isHeld == true) wakeLock.release() }
-    }
-  }
-
-  private fun jobDirection(job: QueuedTransferJob): TransferDirection = when (job) {
-    is QueuedTransferJob.UploadUri -> TransferDirection.Upload
-    is QueuedTransferJob.DownloadFile -> TransferDirection.Download
-  }
-
-  private fun updateTransferProgress(
-    id: String,
-    status: TransferStatus,
-    transferred: Long,
-    total: Long?,
-    bps: Double,
-    message: String,
-  ) {
-    _uiState.update { state ->
-      state.copy(
-        activeTransfers = state.activeTransfers.map { item ->
-          if (item.id == id) {
-            item.copy(
-              status = status,
-              transferredBytes = transferred,
-              totalBytes = total ?: item.totalBytes,
-              bytesPerSec = bps,
-              message = message,
-            )
-          } else {
-            item
-          }
-        },
-      )
-    }
-  }
-
-  private fun markTransferFinished(
-    id: String,
-    fileName: String,
-    direction: TransferDirection,
-    totalBytes: Long,
-    avgBps: Double,
-    status: TransferStatus,
-    message: String,
-    peerName: String,
-  ) {
-    store.appendTransferHistory(
-      TransferHistoryRecord(
-        id = id,
-        fileName = fileName,
-        direction = direction.name,
-        totalBytes = totalBytes,
-        averageBytesPerSec = avgBps,
-        peerName = peerName,
-        status = status.name,
-        message = message,
-        completedAtMs = System.currentTimeMillis(),
-      ),
-    )
-
-    _uiState.update { state ->
-      state.copy(
-        activeTransfers = state.activeTransfers.map { item ->
-          if (item.id == id) {
-            item.copy(
-              status = status,
-              transferredBytes = if (status == TransferStatus.Completed) totalBytes else item.transferredBytes,
-              totalBytes = if (totalBytes > 0L) totalBytes else item.totalBytes,
-              bytesPerSec = avgBps,
-              message = message,
-            )
-          } else {
-            item
-          }
-        },
-        transferHistory = store.loadTransferHistory(),
-      )
-    }
-  }
-
-  override fun onCleared() {
-    super.onCleared()
-    keepAliveJob?.cancel()
-    discovery.stop()
-    viewModelScope.launch { client.disconnect() }
   }
 }

@@ -12,8 +12,8 @@ android {
     applicationId = "com.cathildros.swiftbeam"
     minSdk = 26
     targetSdk = 35
-    versionCode = 10500
-    versionName = "1.5.0"
+    versionCode = 10600
+    versionName = "1.6.0"
   }
 
   signingConfigs {
@@ -51,6 +51,7 @@ android {
   packaging {
     resources {
       excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
     }
   }
 }
@@ -74,6 +75,13 @@ dependencies {
   implementation(libs.androidx.compose.material3)
   implementation(libs.androidx.compose.material.icons.extended)
   debugImplementation(libs.androidx.compose.ui.tooling)
+
+  implementation(libs.androidx.camera.core)
+  implementation(libs.androidx.camera.camera2)
+  implementation(libs.androidx.camera.lifecycle)
+  implementation(libs.androidx.camera.view)
+  implementation(libs.zxing.core)
+  implementation(libs.bouncycastle.bcpkix)
 
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.serialization.json)

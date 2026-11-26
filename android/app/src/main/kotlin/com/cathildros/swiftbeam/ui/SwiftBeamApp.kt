@@ -1,5 +1,6 @@
 package com.cathildros.swiftbeam.ui
 
+import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -7,14 +8,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -24,6 +23,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
@@ -45,23 +45,32 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.launch
+import com.cathildros.swiftbeam.service.ConnectionUiState
+import com.cathildros.swiftbeam.service.TransferStatus
 import com.cathildros.swiftbeam.ui.screens.ConnectScreen
 import com.cathildros.swiftbeam.ui.screens.FilesScreen
 import com.cathildros.swiftbeam.ui.screens.QuickTextScreen
+import com.cathildros.swiftbeam.ui.screens.SyncScreen
 import com.cathildros.swiftbeam.ui.screens.TransfersScreen
 import com.cathildros.swiftbeam.ui.theme.SwiftColors
+import kotlinx.coroutines.launch
 
 @Composable
 fun SwiftBeamApp(
   viewModel: MainViewModel,
+  pendingSyncTreeUri: Uri?,
+  onConsumePendingSyncTree: () -> Unit,
   onPickPhotos: () -> Unit,
   onPickFiles: () -> Unit,
+  onPickFolder: () -> Unit,
+  onPickPhoneHostFolder: () -> Unit,
+  onPickSyncFolder: () -> Unit,
+  onScanQrClick: () -> Unit,
   onRequestNearbyPermission: () -> Unit,
+  onOpenUpdateUrl: (String) -> Unit,
 ) {
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }
@@ -104,14 +113,21 @@ fun SwiftBeamApp(
           selected = state.activeTab == AppTab.Connect,
           onClick = { viewModel.selectTab(AppTab.Connect) },
           icon = { Icon(Icons.Rounded.Link, contentDescription = null) },
-          label = { Text(AppTab.Connect.label) },
+          label = { Text(AppTab.Connect.label, maxLines = 1) },
           colors = navColors,
         )
         NavigationBarItem(
           selected = state.activeTab == AppTab.Files,
           onClick = { viewModel.selectTab(AppTab.Files) },
           icon = { Icon(Icons.Rounded.Folder, contentDescription = null) },
-          label = { Text(AppTab.Files.label) },
+          label = { Text(AppTab.Files.label, maxLines = 1) },
+          colors = navColors,
+        )
+        NavigationBarItem(
+          selected = state.activeTab == AppTab.Sync,
+          onClick = { viewModel.selectTab(AppTab.Sync) },
+          icon = { Icon(Icons.Rounded.Sync, contentDescription = null) },
+          label = { Text(AppTab.Sync.label, maxLines = 1) },
           colors = navColors,
         )
         NavigationBarItem(
@@ -130,14 +146,26 @@ fun SwiftBeamApp(
               Icon(Icons.Rounded.SwapVert, contentDescription = null)
             }
           },
-          label = { Text(AppTab.Transfers.label) },
+          label = { Text(AppTab.Transfers.label, maxLines = 1) },
           colors = navColors,
         )
         NavigationBarItem(
           selected = state.activeTab == AppTab.QuickText,
           onClick = { viewModel.selectTab(AppTab.QuickText) },
-          icon = { Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null) },
-          label = { Text(AppTab.QuickText.label) },
+          icon = {
+            BadgedBox(
+              badge = {
+                if (state.receivedTexts.isNotEmpty() && state.activeTab != AppTab.QuickText) {
+                  Badge(containerColor = SwiftColors.Emerald, contentColor = Color.Black) {
+                    Text(state.receivedTexts.size.toString())
+                  }
+                }
+              },
+            ) {
+              Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null)
+            }
+          },
+          label = { Text(AppTab.QuickText.label, maxLines = 1) },
           colors = navColors,
         )
       }
@@ -153,6 +181,7 @@ fun SwiftBeamApp(
           state = state,
           onRefreshDiscovery = viewModel::refreshDiscovery,
           onRequestNearbyPermission = onRequestNearbyPermission,
+          onScanQrClick = onScanQrClick,
           onHostChanged = viewModel::updateHostInput,
           onPortChanged = viewModel::updatePortInput,
           onPinChanged = viewModel::updatePinInput,
@@ -161,6 +190,10 @@ fun SwiftBeamApp(
           onConnectPeer = viewModel::connectTo,
           onFillSavedPeer = viewModel::fillFromSavedPeer,
           onRemoveSavedPeer = viewModel::removeSavedPeer,
+          onTogglePhoneHost = viewModel::togglePhoneHostEnabled,
+          onPickPhoneHostFolder = onPickPhoneHostFolder,
+          onCheckUpdates = { viewModel.checkForUpdates(silent = false) },
+          onOpenUpdateUrl = onOpenUpdateUrl,
         )
 
         AppTab.Files -> FilesScreen(
@@ -172,14 +205,29 @@ fun SwiftBeamApp(
           onToggleHidden = viewModel::toggleShowHidden,
           onSearchChanged = viewModel::updateSearchQuery,
           onEntryClick = viewModel::openEntry,
+          onPreviewEntry = viewModel::previewEntry,
+          onDismissPreview = viewModel::dismissPreview,
           onToggleSelect = viewModel::toggleSelection,
           onClearSelection = viewModel::clearSelection,
           onPickPhotos = onPickPhotos,
           onPickFiles = onPickFiles,
+          onPickFolder = onPickFolder,
           onDownloadEntries = viewModel::downloadEntries,
           onCreateFolder = viewModel::createFolder,
           onRenameEntry = viewModel::renameEntry,
           onDeleteEntries = viewModel::deleteEntries,
+        )
+
+        AppTab.Sync -> SyncScreen(
+          state = state,
+          pendingSyncTreeUri = pendingSyncTreeUri,
+          pendingSyncTreeLabel = pendingSyncTreeUri?.let { viewModel.resolveSyncFolderLabel(it) },
+          onConsumePendingSyncTree = onConsumePendingSyncTree,
+          onPickSyncFolder = onPickSyncFolder,
+          onAddSyncPair = viewModel::addSyncPair,
+          onSyncNow = viewModel::syncPairNow,
+          onToggleAuto = viewModel::toggleSyncPairAuto,
+          onDeletePair = viewModel::removeSyncPair,
         )
 
         AppTab.Transfers -> TransfersScreen(
@@ -187,6 +235,7 @@ fun SwiftBeamApp(
           onCancelTransfer = viewModel::cancelTransfer,
           onClearFinished = viewModel::clearFinishedTransfers,
           onClearHistory = viewModel::clearHistory,
+          onOpenFile = viewModel::openDownloadedUri,
         )
 
         AppTab.QuickText -> QuickTextScreen(

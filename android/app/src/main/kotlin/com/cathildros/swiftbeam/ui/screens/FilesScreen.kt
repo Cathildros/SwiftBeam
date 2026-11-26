@@ -2,6 +2,7 @@ package com.cathildros.swiftbeam.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
@@ -31,6 +34,7 @@ import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DriveFolderUpload
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.MoreVert
@@ -67,15 +71,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.cathildros.swiftbeam.protocol.PathUtils
 import com.cathildros.swiftbeam.protocol.ProtocolConstants
 import com.cathildros.swiftbeam.protocol.RemoteEntry
-import com.cathildros.swiftbeam.ui.ConnectionUiState
+import com.cathildros.swiftbeam.service.ConnectionUiState
 import com.cathildros.swiftbeam.ui.MainUiState
+import com.cathildros.swiftbeam.ui.PreviewModalState
 import com.cathildros.swiftbeam.ui.theme.SwiftColors
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -89,10 +102,13 @@ fun FilesScreen(
   onToggleHidden: () -> Unit,
   onSearchChanged: (String) -> Unit,
   onEntryClick: (RemoteEntry) -> Unit,
+  onPreviewEntry: (RemoteEntry) -> Unit,
+  onDismissPreview: () -> Unit,
   onToggleSelect: (String) -> Unit,
   onClearSelection: () -> Unit,
   onPickPhotos: () -> Unit,
   onPickFiles: () -> Unit,
+  onPickFolder: () -> Unit,
   onDownloadEntries: (List<RemoteEntry>) -> Unit,
   onCreateFolder: (String) -> Unit,
   onRenameEntry: (RemoteEntry, String) -> Unit,
@@ -138,7 +154,6 @@ fun FilesScreen(
   }
 
   Column(modifier = Modifier.fillMaxSize()) {
-    // Quick Locations bar (when PC allows full filesystem browsing)
     if (conn.metadata.fullFilesystemAccess) {
       val quickPlaces = buildList {
         add("Drives" to ProtocolConstants.DRIVES_VIRTUAL_PATH)
@@ -177,7 +192,6 @@ fun FilesScreen(
       }
     }
 
-    // Current path & action controls
     Surface(
       color = SwiftColors.Surface,
       shape = RoundedCornerShape(16.dp),
@@ -217,33 +231,43 @@ fun FilesScreen(
           }
         }
 
-        // Send / New Folder pills
         if (!conn.metadata.readOnly) {
           Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
           ) {
             Button(
               onClick = onPickPhotos,
               shape = CircleShape,
               colors = ButtonDefaults.buttonColors(containerColor = SwiftColors.Primary),
-              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
               modifier = Modifier.weight(1f),
             ) {
-              Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(Modifier.width(6.dp))
-              Text("Send Photos", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+              Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(15.dp))
+              Spacer(Modifier.width(4.dp))
+              Text("Photos", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
             Button(
               onClick = onPickFiles,
               shape = CircleShape,
               colors = ButtonDefaults.buttonColors(containerColor = SwiftColors.PrimaryDark),
-              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
               modifier = Modifier.weight(1f),
             ) {
-              Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(Modifier.width(6.dp))
-              Text("Send Files", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+              Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(15.dp))
+              Spacer(Modifier.width(4.dp))
+              Text("Files", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            }
+            OutlinedButton(
+              onClick = onPickFolder,
+              shape = CircleShape,
+              border = BorderStroke(1.dp, SwiftColors.Primary.copy(alpha = 0.6f)),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+              modifier = Modifier.weight(1f),
+            ) {
+              Icon(Icons.Rounded.DriveFolderUpload, contentDescription = null, modifier = Modifier.size(15.dp), tint = SwiftColors.Primary)
+              Spacer(Modifier.width(4.dp))
+              Text("Folder", style = MaterialTheme.typography.labelMedium, color = SwiftColors.TextPrimary, maxLines = 1)
             }
             OutlinedButton(
               onClick = {
@@ -252,7 +276,7 @@ fun FilesScreen(
               },
               shape = CircleShape,
               border = BorderStroke(1.dp, SwiftColors.Border),
-              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
             ) {
               Icon(Icons.Rounded.CreateNewFolder, contentDescription = "New Folder", modifier = Modifier.size(16.dp))
             }
@@ -279,7 +303,6 @@ fun FilesScreen(
       }
     }
 
-    // Multi-select toolbar
     if (state.selectedPaths.isNotEmpty()) {
       val selectedEntries = state.entries.filter { it.relativePath in state.selectedPaths }
       Surface(
@@ -345,6 +368,7 @@ fun FilesScreen(
         items(filteredEntries, key = { it.relativePath }) { entry ->
           val isSelected = entry.relativePath in state.selectedPaths
           var menuExpanded by remember { mutableStateOf(false) }
+          val canPreview = !entry.isDirectory && (PathUtils.isPreviewableImage(entry.name) || PathUtils.isPreviewableText(entry.name))
 
           Surface(
             color = if (isSelected) SwiftColors.Primary.copy(alpha = 0.14f) else SwiftColors.Surface,
@@ -354,11 +378,8 @@ fun FilesScreen(
               .fillMaxWidth()
               .combinedClickable(
                 onClick = {
-                  if (state.selectedPaths.isNotEmpty()) {
-                    onToggleSelect(entry.relativePath)
-                  } else {
-                    onEntryClick(entry)
-                  }
+                  if (state.selectedPaths.isNotEmpty()) onToggleSelect(entry.relativePath)
+                  else onEntryClick(entry)
                 },
                 onLongClick = { onToggleSelect(entry.relativePath) },
               ),
@@ -399,6 +420,15 @@ fun FilesScreen(
                   Icon(Icons.Rounded.MoreVert, contentDescription = "Actions", tint = SwiftColors.TextSecondary)
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                  if (canPreview) {
+                    DropdownMenuItem(
+                      text = { Text("Preview") },
+                      onClick = {
+                        menuExpanded = false
+                        onPreviewEntry(entry)
+                      },
+                    )
+                  }
                   DropdownMenuItem(
                     text = { Text(if (entry.isDirectory) "Download Folder" else "Download") },
                     onClick = {
@@ -438,6 +468,15 @@ fun FilesScreen(
       }
     }
   }
+
+  PreviewModalDialog(
+    previewState = state.previewState,
+    onDismiss = onDismissPreview,
+    onDownload = { entry ->
+      onDismissPreview()
+      onDownloadEntries(listOf(entry))
+    },
+  )
 
   if (showNewFolderDialog) {
     AlertDialog(
@@ -541,6 +580,118 @@ fun FilesScreen(
         }
       },
     )
+  }
+}
+
+@Composable
+private fun PreviewModalDialog(
+  previewState: PreviewModalState,
+  onDismiss: () -> Unit,
+  onDownload: (RemoteEntry) -> Unit,
+) {
+  if (previewState is PreviewModalState.None) return
+  @Suppress("DEPRECATION")
+  val clipboard = LocalClipboardManager.current
+
+  val entry = when (previewState) {
+    is PreviewModalState.Loading -> previewState.entry
+    is PreviewModalState.ImagePreview -> previewState.entry
+    is PreviewModalState.TextPreview -> previewState.entry
+    is PreviewModalState.Error -> previewState.entry
+    PreviewModalState.None -> return
+  }
+
+  Dialog(
+    onDismissRequest = onDismiss,
+    properties = DialogProperties(usePlatformDefaultWidth = false),
+  ) {
+    Surface(
+      color = SwiftColors.Surface,
+      shape = RoundedCornerShape(22.dp),
+      border = BorderStroke(1.dp, SwiftColors.Border),
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(16.dp),
+    ) {
+      Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+          Column(modifier = Modifier.weight(1f)) {
+            Text(entry.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(PathUtils.formatBytes(entry.size), style = MaterialTheme.typography.bodySmall)
+          }
+          IconButton(onClick = onDismiss) {
+            Icon(Icons.Rounded.Close, contentDescription = "Close preview", tint = SwiftColors.TextSecondary)
+          }
+        }
+
+        when (previewState) {
+          is PreviewModalState.Loading -> {
+            Box(modifier = Modifier.fillMaxWidth().height(220.dp), contentAlignment = Alignment.Center) {
+              CircularProgressIndicator(color = SwiftColors.Primary)
+            }
+          }
+
+          is PreviewModalState.ImagePreview -> {
+            Image(
+              bitmap = previewState.bitmap.asImageBitmap(),
+              contentDescription = entry.name,
+              contentScale = ContentScale.Fit,
+              modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 420.dp),
+            )
+          }
+
+          is PreviewModalState.TextPreview -> {
+            Surface(
+              color = SwiftColors.Background,
+              shape = RoundedCornerShape(14.dp),
+              border = BorderStroke(1.dp, SwiftColors.Border),
+              modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 380.dp),
+            ) {
+              Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
+                if (previewState.truncated) {
+                  Text("Showing first 256 KB...", style = MaterialTheme.typography.bodySmall, color = SwiftColors.Amber)
+                  Spacer(Modifier.height(6.dp))
+                }
+                Text(
+                  previewState.text,
+                  fontFamily = FontFamily.Monospace,
+                  fontSize = 12.sp,
+                  color = SwiftColors.TextPrimary,
+                )
+              }
+            }
+          }
+
+          is PreviewModalState.Error -> {
+            Text(previewState.error, color = SwiftColors.Rose, style = MaterialTheme.typography.bodyMedium)
+          }
+
+          PreviewModalState.None -> Unit
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          if (previewState is PreviewModalState.TextPreview) {
+            OutlinedButton(
+              onClick = { clipboard.setText(AnnotatedString(previewState.text)) },
+              shape = CircleShape,
+              border = BorderStroke(1.dp, SwiftColors.Border),
+            ) {
+              Text("Copy Text")
+            }
+          }
+          Button(
+            onClick = { onDownload(entry) },
+            shape = CircleShape,
+            colors = ButtonDefaults.buttonColors(containerColor = SwiftColors.Primary),
+            modifier = Modifier.weight(1f),
+          ) {
+            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Download File")
+          }
+        }
+      }
+    }
   }
 }
 

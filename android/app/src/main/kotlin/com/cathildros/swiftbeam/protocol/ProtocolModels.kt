@@ -244,6 +244,8 @@ data class ConnectionTarget(
   val pin: String,
   val useTls: Boolean,
   val clientName: String,
+  val reverseCallbackPort: Int = 0,
+  val reverseCallbackToken: String? = null,
 )
 
 data class ConnectedPeerMetadata(

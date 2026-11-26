@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -23,8 +22,12 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.BookmarkRemove
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -55,9 +58,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.cathildros.swiftbeam.BuildConfig
 import com.cathildros.swiftbeam.data.SavedPeerRecord
 import com.cathildros.swiftbeam.discovery.DiscoveredPeer
-import com.cathildros.swiftbeam.ui.ConnectionUiState
+import com.cathildros.swiftbeam.service.ConnectionUiState
 import com.cathildros.swiftbeam.ui.MainUiState
 import com.cathildros.swiftbeam.ui.theme.SwiftColors
 
@@ -66,6 +70,7 @@ fun ConnectScreen(
   state: MainUiState,
   onRefreshDiscovery: () -> Unit,
   onRequestNearbyPermission: () -> Unit,
+  onScanQrClick: () -> Unit,
   onHostChanged: (String) -> Unit,
   onPortChanged: (String) -> Unit,
   onPinChanged: (String) -> Unit,
@@ -74,6 +79,10 @@ fun ConnectScreen(
   onConnectPeer: (host: String, port: Int, pin: String, useTls: Boolean, label: String) -> Unit,
   onFillSavedPeer: (SavedPeerRecord) -> Unit,
   onRemoveSavedPeer: (SavedPeerRecord) -> Unit,
+  onTogglePhoneHost: (Boolean) -> Unit,
+  onPickPhoneHostFolder: () -> Unit,
+  onCheckUpdates: () -> Unit,
+  onOpenUpdateUrl: (String) -> Unit,
 ) {
   var promptPeer by remember { mutableStateOf<DiscoveredPeer?>(null) }
   var promptPin by remember { mutableStateOf("") }
@@ -86,6 +95,36 @@ fun ConnectScreen(
     contentPadding = PaddingValues(16.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
+    if (state.latestUpdate != null) {
+      item {
+        Card(
+          colors = CardDefaults.cardColors(containerColor = SwiftColors.EmeraldBg),
+          shape = RoundedCornerShape(18.dp),
+          border = BorderStroke(1.dp, SwiftColors.Emerald.copy(alpha = 0.65f)),
+        ) {
+          Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Icon(Icons.Rounded.SystemUpdate, contentDescription = null, tint = SwiftColors.Emerald)
+            Column(modifier = Modifier.weight(1f)) {
+              Text("Update Available: v${state.latestUpdate.version}", fontWeight = FontWeight.SemiBold, color = Color.White)
+              Text("Tap to download the latest SwiftBeam-Android.apk", style = MaterialTheme.typography.bodySmall)
+            }
+            Button(
+              onClick = { onOpenUpdateUrl(state.latestUpdate.apkDownloadUrl) },
+              shape = CircleShape,
+              colors = ButtonDefaults.buttonColors(containerColor = SwiftColors.Emerald, contentColor = Color(0xFF042F2E)),
+              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+            ) {
+              Text("Update", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+            }
+          }
+        }
+      }
+    }
+
     if (!state.nearbyPermissionGranted) {
       item {
         Card(
@@ -122,9 +161,7 @@ fun ConnectScreen(
           border = BorderStroke(1.dp, SwiftColors.Rose.copy(alpha = 0.45f)),
         ) {
           Row(
-            modifier = Modifier
-              .fillMaxWidth()
-              .padding(12.dp),
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
           ) {
@@ -147,7 +184,7 @@ fun ConnectScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
           ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
               Text("Nearby Computers", style = MaterialTheme.typography.titleMedium)
               Text(
                 if (state.discoveredPeers.isEmpty()) "Listening for SwiftBeam beacons on Wi-Fi..."
@@ -155,15 +192,28 @@ fun ConnectScreen(
                 style = MaterialTheme.typography.bodySmall,
               )
             }
-            OutlinedButton(
-              onClick = onRefreshDiscovery,
-              shape = CircleShape,
-              border = BorderStroke(1.dp, SwiftColors.Border),
-              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-            ) {
-              Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(Modifier.width(6.dp))
-              Text("Scan", style = MaterialTheme.typography.labelMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+              Button(
+                onClick = onScanQrClick,
+                enabled = !isConnecting,
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(containerColor = SwiftColors.Primary),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+              ) {
+                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("Scan QR", style = MaterialTheme.typography.labelMedium)
+              }
+              OutlinedButton(
+                onClick = onRefreshDiscovery,
+                shape = CircleShape,
+                border = BorderStroke(1.dp, SwiftColors.Border),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+              ) {
+                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Scan", style = MaterialTheme.typography.labelMedium)
+              }
             }
           }
 
@@ -180,7 +230,7 @@ fun ConnectScreen(
               ) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = SwiftColors.Primary)
                 Text(
-                  "Open SwiftBeam on your Windows or Linux PC on the same Wi-Fi network, or connect manually below.",
+                  "Open SwiftBeam on your Windows or Linux PC, or tap 'Scan QR' above to pair in 1 tap.",
                   style = MaterialTheme.typography.bodySmall,
                 )
               }
@@ -216,12 +266,7 @@ fun ConnectScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                   ) {
                     Surface(color = SwiftColors.Primary.copy(alpha = 0.16f), shape = CircleShape) {
-                      Icon(
-                        Icons.Rounded.Computer,
-                        contentDescription = null,
-                        tint = SwiftColors.Primary,
-                        modifier = Modifier.padding(10.dp).size(20.dp),
-                      )
+                      Icon(Icons.Rounded.Computer, contentDescription = null, tint = SwiftColors.Primary, modifier = Modifier.padding(10.dp).size(20.dp))
                     }
                     Column(modifier = Modifier.weight(1f)) {
                       Text(peer.deviceName, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -296,7 +341,7 @@ fun ConnectScreen(
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
           Text("Manual Connect", style = MaterialTheme.typography.titleMedium)
           Text(
-            "Enter your PC's IP address (or paste a SwiftBeam QR/Portal URL) and the 6-digit pairing PIN.",
+            "Enter your PC's IP address (or paste a SwiftBeam QR URL) and the 6-digit pairing PIN.",
             style = MaterialTheme.typography.bodySmall,
           )
 
@@ -368,6 +413,69 @@ fun ConnectScreen(
               Text("Connect to PC", fontWeight = FontWeight.SemiBold)
             }
           }
+        }
+      }
+    }
+
+    item {
+      Card(
+        colors = CardDefaults.cardColors(containerColor = SwiftColors.Surface),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, SwiftColors.Border),
+      ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+              Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, tint = SwiftColors.Emerald)
+              Column {
+                Text("Two-Way Phone Host Mode", style = MaterialTheme.typography.titleMedium)
+                Text(
+                  "Let your PC browse phone files & send Quick Text back automatically on connect.",
+                  style = MaterialTheme.typography.bodySmall,
+                )
+              }
+            }
+            Switch(
+              checked = state.phoneHostPrefs.enabled,
+              onCheckedChange = onTogglePhoneHost,
+              colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = SwiftColors.Emerald),
+            )
+          }
+
+          if (state.phoneHostPrefs.enabled) {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+              Column(modifier = Modifier.weight(1f)) {
+                Text("Shared folder on phone", style = MaterialTheme.typography.bodySmall)
+                Text(state.phoneHostPrefs.label, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+              }
+              OutlinedButton(
+                onClick = onPickPhoneHostFolder,
+                shape = CircleShape,
+                border = BorderStroke(1.dp, SwiftColors.Border),
+              ) {
+                Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Choose Folder", style = MaterialTheme.typography.labelMedium)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    item {
+      Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Text("SwiftBeam Android v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = onCheckUpdates, enabled = !state.isCheckingUpdate) {
+          Text(if (state.isCheckingUpdate) "Checking..." else "Check for Updates", color = SwiftColors.Primary)
         }
       }
     }

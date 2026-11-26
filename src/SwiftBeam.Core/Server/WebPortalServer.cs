@@ -911,6 +911,7 @@ public sealed class WebPortalServer : IAsyncDisposable
           <div id="freeSpace" style="font-size:12px;color:var(--mint);margin-top:3px"></div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <a class="btn" href="https://github.com/Cathildros/SwiftBeam/releases/latest/download/SwiftBeam-Android.apk" target="_blank" rel="noopener" style="text-decoration:none;border-color:#4C1D95;color:#DDD6FE">Android App</a>
           <button class="btn" onclick="openTextModal()">Text</button>
           <button class="btn" id="hiddenBtn" onclick="toggleHidden()">Hidden</button>
           <button class="btn" id="mkdirBtn" onclick="createFolder()">+ Folder</button>

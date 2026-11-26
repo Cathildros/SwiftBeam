@@ -12,11 +12,13 @@ public sealed record InstallerArtifacts(
     string? LinuxGuiPath,
     string? LinuxCliPath,
     string? LinuxIconPath = null,
-    string? WindowsInstallerPath = null)
+    string? WindowsInstallerPath = null,
+    string? AndroidApkPath = null)
 {
     public bool HasWindows => !string.IsNullOrEmpty(WindowsGuiPath) && File.Exists(WindowsGuiPath);
     public bool HasWindowsInstaller => !string.IsNullOrEmpty(WindowsInstallerPath) && File.Exists(WindowsInstallerPath);
     public bool HasLinux => !string.IsNullOrEmpty(LinuxGuiPath) && File.Exists(LinuxGuiPath);
+    public bool HasAndroidApk => !string.IsNullOrEmpty(AndroidApkPath) && File.Exists(AndroidApkPath);
 
     public string Summary
     {
@@ -25,6 +27,7 @@ public sealed record InstallerArtifacts(
             var parts = new List<string>();
             if (HasWindows || HasWindowsInstaller) parts.Add("Windows");
             if (HasLinux) parts.Add("Linux");
+            if (HasAndroidApk) parts.Add("Android");
             return parts.Count > 0 ? $"Ready: {string.Join(" + ", parts)}" : "No binaries found";
         }
     }
@@ -120,6 +123,8 @@ public sealed class InstallerWebServer : IAsyncDisposable
                 linuxIcon = candidate;
         }
 
+        string? androidApk = FindAndroidApk(searchRoots);
+
         // Fallback: serve our own running single-file executable if it is truly self-contained (>= 5 MB)
         string? processPath = Environment.ProcessPath;
         if (!string.IsNullOrEmpty(processPath) && File.Exists(processPath))
@@ -144,7 +149,43 @@ public sealed class InstallerWebServer : IAsyncDisposable
             }
         }
 
-        return new InstallerArtifacts(winGui, winCli, linuxGui, linuxCli, linuxIcon, winInstaller);
+        return new InstallerArtifacts(winGui, winCli, linuxGui, linuxCli, linuxIcon, winInstaller, androidApk);
+    }
+
+    private static string? FindAndroidApk(List<string> roots)
+    {
+        const long MinApkBytes = 1 * 1024 * 1024;
+        string[] candidates = ["android/SwiftBeam-Android.apk", "SwiftBeam-Android.apk"];
+        foreach (string root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            foreach (string rel in candidates)
+            {
+                string full = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(full)) continue;
+                try
+                {
+                    if (new FileInfo(full).Length >= MinApkBytes && LooksLikeZipArchive(full))
+                        return full;
+                }
+                catch { }
+            }
+        }
+        return null;
+    }
+
+    private static bool LooksLikeZipArchive(string path)
+    {
+        try
+        {
+            byte[] magic = new byte[2];
+            using var fs = File.OpenRead(path);
+            return fs.Read(magic, 0, 2) == 2 && magic[0] == (byte)'P' && magic[1] == (byte)'K';
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string? FindStandaloneBinary(List<string> roots, string[] relativeCandidates, bool expectWindowsPe)
@@ -343,6 +384,10 @@ public sealed class InstallerWebServer : IAsyncDisposable
                         await StreamArtifactAsync(stream, _artifacts.LinuxIconPath, "swiftbeam.png", headOnly, ct).ConfigureAwait(false);
                         break;
 
+                    case "/download/android/SwiftBeam-Android.apk":
+                        await StreamArtifactAsync(stream, _artifacts.AndroidApkPath, "SwiftBeam-Android.apk", headOnly, ct, "application/vnd.android.package-archive").ConfigureAwait(false);
+                        break;
+
                     default:
                         await WriteTextResponseAsync(stream, 404, "Not Found", "text/plain; charset=utf-8", "Not Found", headOnly, ct).ConfigureAwait(false);
                         break;
@@ -439,7 +484,7 @@ public sealed class InstallerWebServer : IAsyncDisposable
         await stream.FlushAsync(ct).ConfigureAwait(false);
     }
 
-    private async Task StreamArtifactAsync(Stream stream, string? filePath, string downloadFileName, bool headOnly, CancellationToken ct)
+    private async Task StreamArtifactAsync(Stream stream, string? filePath, string downloadFileName, bool headOnly, CancellationToken ct, string contentType = "application/octet-stream")
     {
         if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
         {
@@ -451,7 +496,7 @@ public sealed class InstallerWebServer : IAsyncDisposable
         var fi = new FileInfo(filePath);
         string headers =
             $"HTTP/1.1 200 OK\r\n" +
-            $"Content-Type: application/octet-stream\r\n" +
+            $"Content-Type: {contentType}\r\n" +
             $"Content-Disposition: attachment; filename=\"{downloadFileName}\"\r\n" +
             $"Content-Length: {fi.Length}\r\n" +
             $"Cache-Control: no-store\r\n" +
@@ -677,6 +722,24 @@ public sealed class InstallerWebServer : IAsyncDisposable
               </div>
               """;
 
+        string androidSize = _artifacts.HasAndroidApk ? TransferManagerSize(new FileInfo(_artifacts.AndroidApkPath!).Length) : "APK";
+        string androidDownloadUrl = _artifacts.HasAndroidApk
+            ? "/download/android/SwiftBeam-Android.apk"
+            : "https://github.com/Cathildros/SwiftBeam/releases/latest/download/SwiftBeam-Android.apk";
+        string androidSubtitle = _artifacts.HasAndroidApk
+            ? "Install directly from this PC over Wi-Fi — auto-discovery, QR pairing, photo/folder backup &amp; Share Sheet target."
+            : "Download latest Android APK from GitHub Releases — auto-discovery, QR pairing, photo/folder backup &amp; Share Sheet target.";
+        string androidCard = $$"""
+              <div class="card" id="card-android">
+                <div class="card-head">
+                  <h2>Android (APK)</h2>
+                  <span class="badge" id="badge-android">{{androidSize}}</span>
+                </div>
+                <p>{{androidSubtitle}}</p>
+                <a class="btn primary" href="{{androidDownloadUrl}}">Download SwiftBeam-Android.apk</a>
+              </div>
+              """;
+
         return $$"""
             <!doctype html>
             <html lang="en">
@@ -752,6 +815,7 @@ public sealed class InstallerWebServer : IAsyncDisposable
                 <div class="grid">
                   {{winCard}}
                   {{linuxCard}}
+                  {{androidCard}}
                 </div>
                 <footer>
                   <strong>Next step after opening SwiftBeam:</strong>
@@ -762,16 +826,21 @@ public sealed class InstallerWebServer : IAsyncDisposable
               <script>
                 (function() {
                   var ua = (navigator.userAgent || '').toLowerCase();
-                  if (ua.indexOf('windows') !== -1) {
+                  if (ua.indexOf('android') !== -1) {
+                    var ca = document.getElementById('card-android');
+                    var ba = document.getElementById('badge-android');
+                    if (ca) ca.classList.add('recommended');
+                    if (ba) { ba.classList.add('rec'); ba.textContent = 'This Phone • ' + ba.textContent; }
+                  } else if (ua.indexOf('windows') !== -1) {
                     var c = document.getElementById('card-win');
                     var b = document.getElementById('badge-win');
                     if (c) c.classList.add('recommended');
                     if (b) { b.classList.add('rec'); b.textContent = 'This PC • ' + b.textContent; }
                   } else if (ua.indexOf('linux') !== -1) {
-                    var c = document.getElementById('card-linux');
-                    var b = document.getElementById('badge-linux');
-                    if (c) c.classList.add('recommended');
-                    if (b) { b.classList.add('rec'); b.textContent = 'This PC • ' + b.textContent; }
+                    var cl = document.getElementById('card-linux');
+                    var bl = document.getElementById('badge-linux');
+                    if (cl) cl.classList.add('recommended');
+                    if (bl) { bl.classList.add('rec'); bl.textContent = 'This PC • ' + bl.textContent; }
                   }
                 })();
                 function copyText(id, btn) {

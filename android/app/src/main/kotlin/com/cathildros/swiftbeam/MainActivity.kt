@@ -14,13 +14,19 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.cathildros.swiftbeam.ui.MainViewModel
 import com.cathildros.swiftbeam.ui.SwiftBeamApp
+import com.cathildros.swiftbeam.ui.screens.QrScannerDialog
 import com.cathildros.swiftbeam.ui.theme.SwiftBeamTheme
 
 class MainActivity : ComponentActivity() {
   private val viewModel: MainViewModel by viewModels()
+  private var showQrScanner by mutableStateOf(false)
+  private var pendingSyncTreeUri by mutableStateOf<Uri?>(null)
 
   private val permissionLauncher = registerForActivityResult(
     ActivityResultContracts.RequestMultiplePermissions(),
@@ -28,19 +34,51 @@ class MainActivity : ComponentActivity() {
     viewModel.setNearbyPermissionGranted(hasNearbyWifiPermission())
   }
 
+  private val cameraPermissionLauncher = registerForActivityResult(
+    ActivityResultContracts.RequestPermission(),
+  ) { granted ->
+    if (granted) {
+      showQrScanner = true
+    }
+  }
+
   private val pickMediaLauncher = registerForActivityResult(
     ActivityResultContracts.PickMultipleVisualMedia(),
   ) { uris ->
-    if (uris.isNotEmpty()) {
-      viewModel.uploadUris(uris)
-    }
+    if (uris.isNotEmpty()) viewModel.uploadUris(uris)
   }
 
   private val pickFilesLauncher = registerForActivityResult(
     ActivityResultContracts.OpenMultipleDocuments(),
   ) { uris ->
-    if (uris.isNotEmpty()) {
-      viewModel.uploadUris(uris)
+    if (uris.isNotEmpty()) viewModel.uploadUris(uris)
+  }
+
+  private val pickSendFolderLauncher = registerForActivityResult(
+    ActivityResultContracts.OpenDocumentTree(),
+  ) { uri ->
+    if (uri != null) {
+      viewModel.uploadFolderTree(uri)
+    }
+  }
+
+  private val pickPhoneHostFolderLauncher = registerForActivityResult(
+    ActivityResultContracts.OpenDocumentTree(),
+  ) { uri ->
+    if (uri != null) {
+      val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+      runCatching { contentResolver.takePersistableUriPermission(uri, flags) }
+      viewModel.setPhoneHostFolder(uri)
+    }
+  }
+
+  private val pickSyncFolderLauncher = registerForActivityResult(
+    ActivityResultContracts.OpenDocumentTree(),
+  ) { uri ->
+    if (uri != null) {
+      val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+      runCatching { contentResolver.takePersistableUriPermission(uri, flags) }
+      pendingSyncTreeUri = uri
     }
   }
 
@@ -59,14 +97,37 @@ class MainActivity : ComponentActivity() {
       SwiftBeamTheme {
         SwiftBeamApp(
           viewModel = viewModel,
+          pendingSyncTreeUri = pendingSyncTreeUri,
+          onConsumePendingSyncTree = { pendingSyncTreeUri = null },
           onPickPhotos = {
             pickMediaLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
           },
-          onPickFiles = {
-            pickFilesLauncher.launch(arrayOf("*/*"))
+          onPickFiles = { pickFilesLauncher.launch(arrayOf("*/*")) },
+          onPickFolder = { pickSendFolderLauncher.launch(null) },
+          onPickPhoneHostFolder = { pickPhoneHostFolderLauncher.launch(null) },
+          onPickSyncFolder = { pickSyncFolderLauncher.launch(null) },
+          onScanQrClick = {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+              showQrScanner = true
+            } else {
+              cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
           },
           onRequestNearbyPermission = { requestMissingPermissions(force = true) },
+          onOpenUpdateUrl = { url ->
+            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+          },
         )
+
+        if (showQrScanner) {
+          QrScannerDialog(
+            onQrScanned = { raw ->
+              showQrScanner = false
+              viewModel.handleScannedQr(raw)
+            },
+            onDismiss = { showQrScanner = false },
+          )
+        }
       }
     }
   }
